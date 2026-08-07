@@ -123,17 +123,22 @@ Task 13                            (검증 세트 대조 + 도메인 자산 확�
 
 아래 파일을 브라우저로 받아 `data/raw/` 에 넣는다. 세션 기반 다운로드라 스크립트로 받을 수 없다.
 
-| 저장 파일명 | 출처 |
+| 저장 파일명 (접두어) | 출처 |
 |---|---|
-| `seoul_sales.csv` | [추정매출-상권 OA-15572](https://data.seoul.go.kr/dataList/OA-15572/S/1/datasetView.do) |
-| `seoul_stores.csv` | [점포-상권 OA-15577](https://data.seoul.go.kr/dataList/OA-15577/S/1/datasetView.do) |
-| `seoul_footfall.csv` | [길단위인구-상권 OA-15568](https://data.seoul.go.kr/dataList/OA-15568/S/1/datasetView.do) |
-| `seoul_resident.csv` | [상주인구-상권 OA-15584](https://data.seoul.go.kr/dataList/OA-15584/S/1/datasetView.do) |
-| `seoul_worker.csv` | [직장인구-상권 OA-22184](https://data.seoul.go.kr/dataList/OA-22184/S/1/datasetView.do) |
-| `seoul_area.csv` | [영역-상권 OA-15560](https://data.seoul.go.kr/dataList/OA-15560/S/1/datasetView.do) |
-| `seoul_change.csv` | [상권변화지표 OA-15576](https://data.seoul.go.kr/dataList/OA-15576/S/1/datasetView.do) |
-| `seoul_dong_sales.csv` | [추정매출-행정동 OA-22175](https://data.seoul.go.kr/dataList/OA-22175/S/1/datasetView.do) |
+| `seoul_sales_*.csv` | [추정매출-상권 OA-15572](https://data.seoul.go.kr/dataList/OA-15572/S/1/datasetView.do) |
+| `seoul_stores_*.csv` | [점포-상권 OA-15577](https://data.seoul.go.kr/dataList/OA-15577/S/1/datasetView.do) |
+| `seoul_footfall_*.csv` | [길단위인구-상권 OA-15568](https://data.seoul.go.kr/dataList/OA-15568/S/1/datasetView.do) |
+| `seoul_resident_*.csv` | [상주인구-상권 OA-15584](https://data.seoul.go.kr/dataList/OA-15584/S/1/datasetView.do) |
+| `seoul_worker_*.csv` | [직장인구-상권 OA-22184](https://data.seoul.go.kr/dataList/OA-22184/S/1/datasetView.do) |
+| `seoul_area_*.csv` | [영역-상권 OA-15560](https://data.seoul.go.kr/dataList/OA-15560/S/1/datasetView.do) |
+| `seoul_change_*.csv` | [상권변화지표 OA-15576](https://data.seoul.go.kr/dataList/OA-15576/S/1/datasetView.do) |
+| `seoul_dong_sales_*.csv` | [추정매출-행정동 OA-22175](https://data.seoul.go.kr/dataList/OA-22175/S/1/datasetView.do) |
 | `seoul_area_shp/` (있으면) | 영역-상권 페이지의 **SHP(공간영역)** 첨부 |
+
+**★ 연도별로 최소 2년치를 받는다.** `sales_trend`(전년 동분기 대비 증감)를 계산하려면
+최신 분기와 그 4분기 전이 모두 필요하다. 1년치만 받으면 활력축이 통째로 결측이 된다.
+따라서 `seoul_sales_2025.csv`, `seoul_sales_2026.csv` 처럼 연도 접미어를 붙여 저장하고
+로더가 접두어로 glob 하여 이어붙인다. `area`는 시점이 없으므로 1개만 있어도 된다.
 
 인코딩은 `cp949`(EUC-KR)일 가능성이 높으나 확정 아님 — Step 3에서 실측한다.
 
@@ -306,15 +311,16 @@ class SchemaError(RuntimeError):
     """원본 CSV에 기대한 컬럼이 없을 때. 원본 스키마 변경을 조용히 넘기지 않기 위한 장치."""
 
 
-FILES = {
-    "sales": "seoul_sales.csv",
-    "stores": "seoul_stores.csv",
-    "footfall": "seoul_footfall.csv",
-    "resident": "seoul_resident.csv",
-    "worker": "seoul_worker.csv",
-    "area": "seoul_area.csv",
-    "change": "seoul_change.csv",
-    "dong_sales": "seoul_dong_sales.csv",
+# 값은 파일명 접두어다. 연도별로 여러 파일이 있으면 전부 읽어 이어붙인다.
+PREFIXES = {
+    "sales": "seoul_sales",
+    "stores": "seoul_stores",
+    "footfall": "seoul_footfall",
+    "resident": "seoul_resident",
+    "worker": "seoul_worker",
+    "area": "seoul_area",
+    "change": "seoul_change",
+    "dong_sales": "seoul_dong_sales",
 }
 
 # ⚠️ Step 3의 실제 출력에서 복사할 것. 아래는 자리표시가 아니라 교체 대상이다.
@@ -332,32 +338,37 @@ REQUIRED_COLUMNS = {
 _ENCODINGS = ("cp949", "utf-8-sig", "utf-8")
 
 
-@lru_cache(maxsize=None)
-def load(dataset: str) -> pd.DataFrame:
-    if dataset not in FILES:
-        raise ValueError(f"알 수 없는 데이터셋: {dataset}. 가능: {sorted(FILES)}")
-
-    path = RAW_DIR / FILES[dataset]
-    if not path.exists():
-        raise FileNotFoundError(
-            f"{path} 없음. data/raw/ 에 원본을 직접 내려받아 두어야 한다 (Task 1 사전 작업)."
-        )
-
+def _read_one(path) -> pd.DataFrame:
     last_error = None
     for enc in _ENCODINGS:
         try:
-            df = pd.read_csv(path, encoding=enc, low_memory=False)
-            break
+            return pd.read_csv(path, encoding=enc, low_memory=False)
         except UnicodeDecodeError as exc:
             last_error = exc
-    else:
-        raise SchemaError(f"{path} 인코딩 판별 실패: {last_error}")
+    raise SchemaError(f"{path} 인코딩 판별 실패: {last_error}")
 
+
+@lru_cache(maxsize=None)
+def load(dataset: str) -> pd.DataFrame:
+    if dataset not in PREFIXES:
+        raise ValueError(f"알 수 없는 데이터셋: {dataset}. 가능: {sorted(PREFIXES)}")
+
+    paths = sorted(RAW_DIR.glob(f"{PREFIXES[dataset]}*.csv"))
+    if not paths:
+        raise FileNotFoundError(
+            f"{RAW_DIR}/{PREFIXES[dataset]}*.csv 없음. "
+            "data/raw/ 에 원본을 직접 내려받아 두어야 한다 (Task 1 사전 작업)."
+        )
+
+    frames = [_read_one(p) for p in paths]
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     df.columns = [c.strip() for c in df.columns]
+
     missing = [c for c in REQUIRED_COLUMNS[dataset] if c not in df.columns]
     if missing:
         raise SchemaError(
-            f"{path.name} 필수 컬럼 누락: {missing}\n실제 컬럼: {list(df.columns)}"
+            f"{dataset} 필수 컬럼 누락: {missing}\n"
+            f"읽은 파일: {[p.name for p in paths]}\n실제 컬럼: {list(df.columns)}"
         )
     return df
 ```
