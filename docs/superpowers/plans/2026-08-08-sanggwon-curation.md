@@ -1296,6 +1296,11 @@ OUTPUT_COLUMNS = [
     "area_code", "industry_code", "area_type", "pool_size",
     "demand_raw_resident", "demand_raw_worker", "demand_raw_footfall",
     "competition", "vitality", "fit",
+    # 경쟁축의 두 재료를 따로도 내보낸다. 스펙 7.3의 패턴 정의가 합성치가 아니라
+    # 원 지표를 지목하기 때문이다 — 함정상권은 "점포당매출 하위", 포화는
+    # "점포밀도 상위 5%"다. 합성치로 근사하면 전혀 다른 상권이 잡힌다(Task 6).
+    "sales_per_store_pct",   # 풀내 백분위. 높을수록 점포당매출이 많다
+    "density_pct",           # 풀내 백분위. 높을수록 점포가 빽빽하다
 ]
 
 
@@ -1368,7 +1373,7 @@ def score(data: Normalized) -> pd.DataFrame:
         ["industry_code", "area_type"])["area_code"].transform("size")
 
     # ── ② 경쟁: 점포당매출(↑) + 배후 대비 점포밀도(↓) ──
-    sales_rank = by_pool(ind["sales_per_store"])
+    out["sales_per_store_pct"] = by_pool(ind["sales_per_store"])
 
     # 한쪽 인구만 결측일 때 0으로 채우면 배후가 과소집계되어 밀도가 부풀고
     # 경쟁축이 일방적으로 깎인다. 실측: 한쪽만 결측인 상권 20곳(업종행 95개),
@@ -1376,12 +1381,13 @@ def score(data: Normalized) -> pd.DataFrame:
     # 21,188행 중 최하위(0.6점)로 찍혔다. 없는 인구를 0명이라고 하지 않는다.
     backing = areas["resident_pop"] + areas["worker_pop"]
     density = ind["store_count"] / ind["area_code"].map(backing).replace(0, np.nan)
-    density_rank = 100.0 - by_pool(density)
+    out["density_pct"] = by_pool(density)
+    density_rank = 100.0 - out["density_pct"]   # 빽빽할수록 경쟁축에는 감점
     # 두 구성요소 중 하나라도 없으면 경쟁축은 NaN이다 — 재정규화하지 않는다.
     # 특히 sales_per_store 결측 253행은 "매출은 잡히는데 점포수가 0"인 원본
     # 불일치라, 밀도만으로 채점하면 데이터 결함이 "경쟁자 없음"이라는 호재로
     # 둔갑한다. 경쟁축은 필수 축이고, 없으면 Task 5가 등급을 보류한다.
-    out["competition"] = (sales_rank * 0.6 + density_rank * 0.4)
+    out["competition"] = (out["sales_per_store_pct"] * 0.6 + density_rank * 0.4)
 
     # ── ③ 활력: 매출추세(↑) + 폐업률(↓) + 평균영업개월(↑) + 점포증감(↓) ──
     trend_rank = by_pool(ind["sales_trend"])
@@ -1848,7 +1854,9 @@ git commit -m "feat(engine): 업종그룹 가중합 + 업종별 등급컷, 도�
 **Interfaces:**
 - Consumes: `etl.engine.axes.score()` 출력 + `Normalized.industries` (원지표)
 - Produces:
-  - `etl.engine.patterns.detect(axis_df, industries) -> pd.DataFrame` — `area_code, industry_code, patterns: list[str]`
+  - `etl.engine.patterns.detect(axis_df, industries) -> pd.DataFrame` — `area_code, industry_code, patterns: list[str], patterns_unknown: list[str]`
+    - `patterns`는 감지된 패턴, `patterns_unknown`은 입력 결측으로 **판정하지 못한** 패턴이다. "경고 없음"과 "확인 못 함"은 다른 말이라 합치지 않는다(스펙 10.3).
+    - 「상위 N%」를 뜻하는 조건은 `sales_per_store_pct` / `density_pct`(원 지표의 풀내 백분위)에 건다. 합성 `competition`은 백분위가 아니라 가중합이라 임계값이 전혀 다른 비율을 고른다.
   - `etl.engine.patterns.PATTERNS: tuple[str, ...]` = `("함정상권", "침몰상권", "포화", "블루오션")`
 
 패턴은 점수와 **독립된 레이어**다(스펙 7.3). 등급 계산에 섞지 않는다 — 평균에 묻히면 안 되는 정보이기 때문이다. `블루오션`은 Task 10 대안 추천의 신호로 그대로 재사용된다.
@@ -1869,6 +1877,8 @@ def _frames(**overrides):
         "demand_raw_resident": [50.0], "demand_raw_worker": [50.0],
         "demand_raw_footfall": [50.0], "competition": [50.0],
         "vitality": [50.0], "fit": [50.0],
+        # 패턴 조건은 합성 경쟁축이 아니라 이 두 원 지표 백분위에 걸린다
+        "sales_per_store_pct": [50.0], "density_pct": [50.0],
     })
     row = {c: 0.0 for c in INDUSTRY_COLUMNS}
     row.update({"area_code": "A", "industry_code": "CS1", "industry_name": "테스트",
@@ -1894,11 +1904,11 @@ def test_pattern_names_are_fixed():
 
 def test_trap_area_detected():
     """유동 상위 + 점포당매출 하위 → 함정 상권"""
-    assert "함정상권" in _detect(demand_raw_footfall=95.0, competition=10.0)
+    assert "함정상권" in _detect(demand_raw_footfall=95.0, sales_per_store_pct=10.0)
 
 
 def test_trap_area_not_detected_when_sales_healthy():
-    assert "함정상권" not in _detect(demand_raw_footfall=95.0, competition=80.0)
+    assert "함정상권" not in _detect(demand_raw_footfall=95.0, sales_per_store_pct=80.0)
 
 
 def test_sinking_area_detected():
@@ -1911,7 +1921,8 @@ def test_sinking_needs_all_three_conditions():
 
 
 def test_saturation_detected():
-    assert "포화" in _detect(competition=3.0)
+    """스펙 7.3: 점포밀도 상위 5%. 합성 경쟁축이 아니라 밀도 백분위로 판정한다."""
+    assert "포화" in _detect(density_pct=97.0)
 
 
 def test_blue_ocean_detected():
@@ -1926,6 +1937,52 @@ def test_normal_area_has_no_pattern():
 def test_output_row_count_matches_input():
     axis, ind = _frames()
     assert len(patterns.detect(axis, ind)) == len(axis)
+
+
+def test_saturation_uses_raw_density_not_the_composite():
+    """스펙 7.3의 포화는 "점포밀도 상위 5%"다.
+
+    합성 경쟁축으로 근사하면 안 된다. competition은 두 백분위의 0.6/0.4
+    가중합이라 분포가 가운데로 몰려(평균 49.8, 5분위 값 15.98) `<= 5`가
+    5%가 아니라 0.50%를 고른다 — 실측 스펙 대상 1,136행 중 105행만 잡혔다.
+    """
+    axis, ind = _frames()
+    axis = axis.copy()
+    # 밀도는 최상위인데 점포당매출이 좋아 합성 경쟁축은 멀쩡한 상권
+    axis.loc[0, "density_pct"] = 99.0
+    axis.loc[0, "sales_per_store_pct"] = 90.0
+    axis.loc[0, "competition"] = 90.0 * 0.6 + (100.0 - 99.0) * 0.4
+    out = patterns.detect(axis, ind)
+    assert "포화" in out.loc[0, "patterns"]
+
+
+def test_trap_uses_sales_per_store_not_the_composite():
+    """스펙 7.3의 함정상권은 "유동 상위 + 점포당매출 하위"다.
+    밀도를 섞으면 의미가 달라진다 — 실측 대칭차 890행."""
+    axis, ind = _frames()
+    axis = axis.copy()
+    # 점포당매출은 바닥인데 밀도가 낮아 합성 경쟁축은 중간인 상권
+    axis.loc[0, "demand_raw_footfall"] = 95.0
+    axis.loc[0, "sales_per_store_pct"] = 5.0
+    axis.loc[0, "density_pct"] = 5.0
+    axis.loc[0, "competition"] = 5.0 * 0.6 + (100.0 - 5.0) * 0.4   # = 41.0
+    out = patterns.detect(axis, ind)
+    assert "함정상권" in out.loc[0, "patterns"]
+
+
+def test_missing_input_is_unknown_not_absent():
+    """입력이 없으면 "패턴 없음"이 아니라 "판정 못 함"이다.
+
+    비교 연산이 NaN에 False를 주는 탓에 침몰상권이 조용히 "최악 조합 아님"으로
+    나오고 있었다 — sales_trend 결측 1,101행 중 1,076행은 등급까지 정상 부여되어
+    사용자가 구분할 방법이 없었다.
+    """
+    axis, ind = _frames()
+    ind = ind.copy()
+    ind.loc[0, "sales_trend"] = float("nan")
+    out = patterns.detect(axis, ind)
+    assert "침몰상권" in out.loc[0, "patterns_unknown"]
+    assert "침몰상권" not in out.loc[0, "patterns"]
 ```
 
 - [ ] **Step 2: 테스트 실패 확인**
@@ -1943,52 +2000,92 @@ Expected: FAIL — `ModuleNotFoundError: etl.engine.patterns`
 점수 평균에 묻히면 안 되는 조합 신호를 별도 레이어로 잡는다.
 등급 계산에는 관여하지 않는다.
 """
-import numpy as np
 import pandas as pd
 
 PATTERNS = ("함정상권", "침몰상권", "포화", "블루오션")
 
-# 임계값. 백분위(0~100) 기준이며 조정 시 스펙 7.3 표와 함께 검토한다.
-FOOTFALL_HIGH = 80.0        # 유동 상위
-COMPETITION_LOW = 30.0      # 점포당매출·밀도 하위
-SATURATION_TOP = 5.0        # 점포밀도 상위 5% → competition 하위 5%
-BACKING_HIGH = 70.0         # 배후 충분
-COMPETITION_HIGH = 70.0     # 경쟁 여유
+# 임계값. 조정 시 스펙 7.3 표와 함께 검토한다.
+#
+# ⚠️ competition은 백분위가 아니다. 두 백분위의 0.6/0.4 가중합이라 분포가
+# 가운데로 몰린다(평균 49.8, 표준편차 20.9). 실제 5분위 값은 15.98이므로
+# `competition <= 5`는 5%가 아니라 0.50%를 고른다 — 초안이 이 착각으로 포화를
+# 10배 미탐했다(스펙 대상 1,136행 중 105행만 잡힘). 「상위 N%」를 뜻하는
+# 임계값은 반드시 원 지표의 백분위 컬럼(sales_per_store_pct, density_pct)에
+# 걸고, competition에는 "여유롭다" 같은 방향성 판단만 건다.
+FOOTFALL_HIGH = 80.0        # 유동 상위 (demand_raw_footfall 백분위)
+SALES_PER_STORE_LOW = 30.0  # 점포당매출 하위 (sales_per_store_pct 백분위)
+SATURATION_TOP = 95.0       # 점포밀도 상위 5% (density_pct 백분위) — 스펙 7.3
+BACKING_HIGH = 70.0         # 배후 충분 (인구 백분위)
+COMPETITION_HIGH = 70.0     # 경쟁 여유 — 합성 경쟁축의 방향성 판단(백분위 아님)
 BLUE_OCEAN_MAX_STORES = 5   # 이미 점포가 많으면 블루오션이 아니다
 SALES_DROP = -0.05          # 매출 -5% 이하
 CLOSE_RATE_HIGH = 0.10      # 폐업률 10% 이상
 
+# 패턴별 입력. 하나라도 결측이면 "패턴 없음"이 아니라 "미평가"다.
+PATTERN_INPUTS = {
+    "함정상권": ("demand_raw_footfall", "sales_per_store_pct"),
+    "침몰상권": ("sales_trend", "close_rate", "store_delta"),
+    "포화": ("density_pct",),
+    "블루오션": ("demand_raw_resident", "demand_raw_worker",
+              "competition", "store_count"),
+}
+
 
 def detect(axis_df: pd.DataFrame, industries: pd.DataFrame) -> pd.DataFrame:
+    """4종 패턴을 판정한다. 반환은 `patterns`(감지됨)와 `patterns_unknown`
+    (입력이 없어 판정 못 함) 둘로 나뉜다.
+
+    둘을 합치지 않는 이유: 비교 연산은 NaN에 False를 주므로 입력이 없으면
+    조용히 "패턴 없음"이 된다. 화면에서 "경고 없음"과 "확인 못 함"은 전혀 다른
+    말인데 그대로 두면 구분이 사라진다. 실측으로 침몰상권이 이 함정에 걸려
+    있었다 — sales_trend 결측 1,101행 중 1,076행은 등급이 정상 부여되어,
+    사용자는 "최악 조합 아님"으로 읽지만 실제로는 세 조건 중 하나를 평가조차
+    못 한 상태였다.
+    """
     merged = axis_df.merge(
         industries[["area_code", "industry_code", "store_count",
                     "sales_trend", "close_rate", "store_delta"]],
         on=["area_code", "industry_code"], how="left",
     )
 
-    footfall = pd.to_numeric(merged["demand_raw_footfall"], errors="coerce")
-    resident = pd.to_numeric(merged["demand_raw_resident"], errors="coerce")
-    worker = pd.to_numeric(merged["demand_raw_worker"], errors="coerce")
-    comp = pd.to_numeric(merged["competition"], errors="coerce")
-    trend = pd.to_numeric(merged["sales_trend"], errors="coerce")
-    close = pd.to_numeric(merged["close_rate"], errors="coerce")
-    delta = pd.to_numeric(merged["store_delta"], errors="coerce")
-    stores = pd.to_numeric(merged["store_count"], errors="coerce")
-
-    backing = pd.concat([resident, worker], axis=1).max(axis=1)
+    num = {c: pd.to_numeric(merged[c], errors="coerce")
+           for cols in PATTERN_INPUTS.values() for c in cols}
+    # 배후는 두 인구 중 큰 쪽 — 하나만 있어도 판정할 수 있다
+    backing = pd.concat([num["demand_raw_resident"], num["demand_raw_worker"]],
+                        axis=1).max(axis=1)
 
     flags = pd.DataFrame({
-        "함정상권": (footfall >= FOOTFALL_HIGH) & (comp <= COMPETITION_LOW),
-        "침몰상권": (trend <= SALES_DROP) & (close >= CLOSE_RATE_HIGH) & (delta > 0),
-        "포화": comp <= SATURATION_TOP,
-        "블루오션": ((backing >= BACKING_HIGH) & (comp >= COMPETITION_HIGH)
-                  & (stores <= BLUE_OCEAN_MAX_STORES)),
-    }).fillna(False)
+        # 스펙 7.3: 통행량은 많은데 점포당매출이 낮다 = 통행이 소비로 안 이어짐.
+        # 밀도를 섞은 합성 경쟁축을 쓰면 다른 상권이 잡힌다(실측 대칭차 890행).
+        "함정상권": ((num["demand_raw_footfall"] >= FOOTFALL_HIGH)
+                  & (num["sales_per_store_pct"] <= SALES_PER_STORE_LOW)),
+        "침몰상권": ((num["sales_trend"] <= SALES_DROP)
+                  & (num["close_rate"] >= CLOSE_RATE_HIGH)
+                  & (num["store_delta"] > 0)),
+        "포화": num["density_pct"] >= SATURATION_TOP,
+        "블루오션": ((backing >= BACKING_HIGH)
+                  & (num["competition"] >= COMPETITION_HIGH)
+                  & (num["store_count"] <= BLUE_OCEAN_MAX_STORES)),
+    })
 
-    merged["patterns"] = [
-        [name for name in PATTERNS if row[name]] for _, row in flags.iterrows()
-    ]
-    return merged[["area_code", "industry_code", "patterns"]]
+    unknown = pd.DataFrame({
+        "함정상권": num["demand_raw_footfall"].isna() | num["sales_per_store_pct"].isna(),
+        "침몰상권": (num["sales_trend"].isna() | num["close_rate"].isna()
+                  | num["store_delta"].isna()),
+        "포화": num["density_pct"].isna(),
+        "블루오션": (backing.isna() | num["competition"].isna()
+                  | num["store_count"].isna()),
+    })
+    # 판정 못 한 패턴은 감지 목록에서 뺀다 — False가 "아님"으로 읽히면 안 된다
+    flags = flags & ~unknown
+
+    def names(frame: pd.DataFrame) -> list[list[str]]:
+        arr = frame[list(PATTERNS)].to_numpy(dtype=bool)
+        return [[n for n, on in zip(PATTERNS, row) if on] for row in arr]
+
+    merged["patterns"] = names(flags)
+    merged["patterns_unknown"] = names(unknown)
+    return merged[["area_code", "industry_code", "patterns", "patterns_unknown"]]
 ```
 
 - [ ] **Step 4: 테스트 통과 확인**
