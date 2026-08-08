@@ -1033,7 +1033,9 @@ git commit -m "feat(etl): 상권 경계 폴리곤 생성 + 자치구 분할"
 - Consumes: `etl.adapters.schema.Normalized`, `AGE_COLUMNS`, `TIME_COLUMNS`, `AREA_TYPES`
 - Produces:
   - `etl.engine.axes.score(data: Normalized) -> pd.DataFrame` — 컬럼:
-    `area_code, industry_code, area_type, demand_raw_resident, demand_raw_worker, demand_raw_footfall, competition, vitality, fit`
+    `area_code, industry_code, area_type, pool_size, demand_raw_resident, demand_raw_worker, demand_raw_footfall, competition, vitality, fit`
+    - `pool_size`는 그 행이 속한 (업종 × 상권종류) 풀의 표본 수. 얇은 풀은 순위 점수가 잡음이라 Task 5/웹이 신뢰 여부를 판단한다.
+    - `competition`은 **필수 축**이다. NaN이면 Task 5가 등급을 매기지 않고 🔴 분석 불가로 보낸다.
     - `demand_raw_*` 3개는 **각각 0~100 백분위**이며 합성하지 않는다. 업종그룹 가중치가 Task 5에서 이 셋을 섞는다 (스펙 7.1 "업종마다 중요한 인구가 다르다").
     - `competition`, `vitality`, `fit`은 0~100 백분위. 클수록 좋다.
     - `area_type`은 Task 5가 등급컷을 같은 풀 기준으로 끊을 수 있도록 함께 내보낸다.
@@ -1396,7 +1398,7 @@ def score(data: Normalized) -> pd.DataFrame:
 ```bash
 .venv/bin/python -m pytest etl/tests/test_axes.py -v
 ```
-Expected: 16 passed
+Expected: 15 passed
 
 전체 스위트도 함께 돌려 어댑터 계약 변경이 다른 데를 깨지 않았는지 본다:
 
