@@ -63,18 +63,34 @@ test("matchArea: 겹칠 때 더 가까운 중심(면적가중 centroid)을 고�
   assert.equal(matchArea({ lng: 126.95, lat: 37.55 }, boundary).code, "NARROW");
 });
 
-test("matchArea: 실데이터 — 세 상권이 만나는 꼭짓점에서 면적 중심이 가장 가까운 쪽을 고른다", () => {
-  // 종로구 실경계: [126.968482, 37.581383]는 세 상권 폴리곤이 동시에 공유하는
-  // 꼭짓점이다(3110008 배화여자대학교/박노수미술관, 3120002 서촌/경복궁역,
-  // 3130001 통인시장 — 74개 상권 전체를 스캔해 확인). 면적가중 centroid 기준
-  // 거리는 3130001 ~162m, 3110008 ~171m, 3120002 ~375m로 3130001이 가장 가깝다.
-  // (외곽 링의 첫 꼭짓점을 "중심"으로 쓰던 이전 구현은 이 점에서 3120002를 잘못 골랐다.
-  //  이 셋 중 두 상권만 비교하면 3110008이 이기지만, 실제로는 세 번째 상권이 더 가깝다 —
-  //  그래서 이 테스트는 "두 후보끼리" 비교가 아니라 전체 boundary 파일을 그대로 읽어
-  //  matchArea가 스스로 모든 후보를 훑게 한다.)
+test("pointInPolygon: 실데이터 — 세 상권이 공유하는 꼭짓점의 경계 판정은 보장되지 않는다(현재 동작 기록)", () => {
+  // 종로구 실경계: [126.968482, 37.581383]는 세 상권 폴리곤(3110008 배화여자대학교/
+  // 박노수미술관, 3120002 서촌/경복궁역, 3130001 통인시장)이 동시에 공유하는 정확한
+  // 꼭짓점이다. shapely로 대조하면 셋 다 covers=true·contains=false — 완전히 경계 위다.
+  // locate.js의 pointInPolygon 문서에 적었듯 이런 정확한 경계 케이스는 판정을 보장하지
+  // 않는다: 표준 ray-casting이 부동소수점 특성상 세 링 중 어느 것을 "내부"로 셀지
+  // 일관되지 않게 판단한다. 이 테스트는 "이게 정답"이라고 주장하는 게 아니라, 현재
+  // 동작을 회귀 감지용으로 고정해 두는 characterization test다 — 값이 갑자기 바뀌면
+  // (예: 알고리즘을 건드렸는데 의도치 않게 결과가 달라지면) 여기서 걸린다.
   const boundary = readBoundary("11110");
-  const m = matchArea({ lng: 126.968482, lat: 37.581383 }, boundary);
-  assert.equal(m.code, "3130001");
+  const areas = Object.fromEntries(boundary.areas.map((a) => [a.code, a]));
+  const point = [126.968482, 37.581383];
+  assert.equal(pointInPolygon(point, areas["3110008"].rings[0][0]), false);
+  assert.equal(pointInPolygon(point, areas["3120002"].rings[0][0]), true);
+  assert.equal(pointInPolygon(point, areas["3130001"].rings[0][0]), false);
+});
+
+test("matchArea: 실데이터 — 넓은 관광특구가 좁은 상권을 품을 때도 면적 중심이 더 가까운 쪽을 고른다", () => {
+  // [127.014788, 37.572226]는 3001494(종로·청계 관광특구)와 3120017(동묘앞역/동묘) 두
+  // 상권 폴리곤 "내부"에 완전히 걸친다 — 경계가 아니라 진짜 겹치는 영역이다(shapely
+  // contains=true 둘 다). 면적가중 centroid 기준 정답은 3120017(~50m)이고 3001494는
+  // 훨씬 멀다(~1.9km). 광역 관광특구가 좁은 상권을 통째로 품는, 이 데이터셋에서
+  // 구조적으로 흔한 패턴을 그대로 보여주는 사례라 vertex 케이스와 달리 pointInPolygon의
+  // 경계 처리와 무관하게 matchArea의 일반 경로(내부 판정 → centroid tie-break)를
+  // 그대로 지나간다. 첫 꼭짓점을 중심 프록시로 쓰던 이전 구현은 3001494를 잘못 골랐다.
+  const boundary = readBoundary("11110");
+  const m = matchArea({ lng: 127.014788, lat: 37.572226 }, boundary);
+  assert.equal(m.code, "3120017");
 });
 
 test("matchArea: 실데이터 — 북촌(안국역) 구멍 중심은 상권 밖이다", () => {
