@@ -216,15 +216,13 @@ test("실데이터: 출하된 floor_coefficients.json은 잠정값이라 층수 
 test("실데이터: 11110 상권에서 real assets로 recommend가 돌아간다 (의원 등장은 의도된 출력)", () => {
   const score = readJSON("../data/score/11110.json");
   const meta = readJSON("../data/meta.json");
-  const groupsRaw = readJSON("../../data/domain/industry_groups.json");
-  const floorRaw = readJSON("../../data/domain/floor_coefficients.json");
-
-  const groups = Object.fromEntries(
-    Object.entries(groupsRaw.assignment).map(([code, v]) => [code, v.group])
-  );
+  // 런타임과 같은 경로로 자산을 만든다: 웹은 data/domain/을 못 읽고
+  // meta.json의 floor_config만 본다(build.py가 실어 보낸다).
   const assets = {
-    groups, floorTable: floorRaw.coefficients,
-    warnBelow: floorRaw.warn_below, minCoefficient: floorRaw.min_coefficient,
+    groups: Object.fromEntries(meta.industries.map((i) => [i.code, i.group])),
+    floorTable: meta.floor_config.coefficients,
+    warnBelow: meta.floor_config.warn_below,
+    minCoefficient: meta.floor_config.min_coefficient,
   };
 
   const areaCode = Object.keys(score.areas)[0];

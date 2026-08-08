@@ -34,6 +34,8 @@ def _assets():
         },
         floors={"유동의존형": {f: 1.0 for f in FLOORS},
                 "배후의존형": {f: 1.0 for f in FLOORS}},
+        floor_warn_below=0.75,
+        floor_min_coefficient=0.6,
         provisional=True,
     )
 

@@ -158,6 +158,13 @@ def main() -> None:
         "gu": SEOUL_GU,
         "sources": SOURCES,
         "floor_basis": "heuristic",
+        # 브라우저는 web/ 를 루트로 서비스되므로 data/domain/ 을 직접 읽지 못한다.
+        # 층수 계수와 임계값은 여기로만 전달된다 — web/js는 이 블록만 본다.
+        "floor_config": {
+            "coefficients": assets.floors,
+            "warn_below": assets.floor_warn_below,
+            "min_coefficient": assets.floor_min_coefficient,
+        },
     })
 
     print(f"빌드 완료 — {_label(data.period)}, 자치구 {len(buckets)}개"

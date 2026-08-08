@@ -26,6 +26,11 @@ class DomainAssets:
     groups: dict[str, str]              # 업종코드 → 그룹명
     weights: dict[str, dict[str, float]]  # 그룹명 → {축키: 가중치}
     floors: dict[str, dict[str, float]]   # 그룹명 → {층수코드: 계수}
+    # 아래 둘은 브라우저가 쓰는 임계값이라 build가 meta.json에 실어 보낸다.
+    # 웹은 data/ 아래만 fetch할 수 있어서(GitHub Pages 루트가 web/) data/domain/을
+    # 직접 읽지 못한다 — 도메인 자산은 반드시 빌드 산출물을 거쳐야 한다.
+    floor_warn_below: float               # 이 계수 미만이면 화면에 층수 경고
+    floor_min_coefficient: float          # 이 계수 미만이면 대안 추천 후보에서 제외
     provisional: bool
 
 
@@ -34,10 +39,14 @@ def load_domain() -> DomainAssets:
         return json.loads((DOMAIN_DIR / name).read_text(encoding="utf-8"))
 
     g, w, f = read("industry_groups.json"), read("axis_weights.json"), read("floor_coefficients.json")
+    # 조용한 기본값을 두지 않는다 — 임계값이 빠진 채 배포되면 경고도 필터도
+    # 있는 척만 하고 아무 일도 하지 않는다. 없으면 빌드가 여기서 죽는 편이 낫다.
     return DomainAssets(
         groups={code: item["group"] for code, item in g["assignment"].items()},
         weights=w["weights"],
         floors=f["coefficients"],
+        floor_warn_below=float(f["warn_below"]),
+        floor_min_coefficient=float(f["min_coefficient"]),
         provisional=any(x.get("provisional", False) for x in (g, w, f)),
     )
 
