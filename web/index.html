@@ -11,6 +11,7 @@
   <header>
     <h1>상권 큐레이션</h1>
     <p class="tagline">이 서비스는 결정해주지 않습니다. 현장에 나가기 전에 후보를 걸러줍니다.</p>
+    <p id="provisional-notice" class="provisional-notice" hidden></p>
   </header>
 
   <form id="query">
@@ -18,7 +19,9 @@
       <input name="address" required placeholder="예) 서울 마포구 양화로 45">
     </label>
     <label>오픈하려는 업종
-      <input name="industry" required placeholder="예) 카페, 국밥집, 무인세탁">
+      <input name="industry" required list="industry-options"
+             placeholder="예) 한식, 커피, 치킨, 세탁소 (목록에서 선택 가능)">
+      <datalist id="industry-options"></datalist>
     </label>
     <label>층수
       <select name="floor" required>
@@ -32,7 +35,9 @@
     <button type="submit">분석하기</button>
   </form>
 
-  <section id="result" hidden></section>
+  <!-- F9: aria-live로 결과 갱신을 스크린리더에 알리고, tabindex="-1"로
+       제출 후 포커스를 여기로 옮길 수 있게 한다(main.js). -->
+  <section id="result" hidden aria-live="polite" tabindex="-1"></section>
 
   <footer>
     <p id="data-period"></p>

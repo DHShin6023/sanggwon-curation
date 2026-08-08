@@ -2,14 +2,22 @@
 // 강제한다 — 이 파일에는 AI 호출이 없다. Task 12는 문장 품질만 더한다.
 //
 // ⚠️ 2026-08-08 개정 블록 반영:
-//  (가) 자산은 web/data/meta.json 하나에서만 온다 (data/domain/*은 브라우저가
-//      도달 못 한다).
-//  (나) 창업 필터(필터 ①)는 폐기됐다 — startupFilter 자산 없음, 화면에 자격
-//      관련 태그/경고/각주를 붙이지 않는다.
-//  (다) recommend()는 {recommendations, skipped}를 반환한다. skipped는 조용히
-//      버리지 않고 console.warn으로 남긴다.
+//  (가) 자산은 web/data/meta.json 하나에서만 온다.
+//  (나) 창업 필터(필터 ①)는 폐기됐다 — startupFilter 자산 없음.
+//  (다) recommend()는 {recommendations, skipped}를 반환한다.
 //  (라) judge()는 entry.base===null이거나 group/floor가 floorTable에 없으면
 //      던진다 — analyze()가 잡아서 🔴 "분석 불가"로 떨어뜨린다.
+//
+// ⚠️ 리뷰 라운드 1(2026-08-08) 반영 — 상세는 task-11-report.md의 "Fix round 1" 절.
+//  F1  등급이 매겨진 채점 풀(골목/전통시장/광역)을 화면에 드러낸다.
+//  F4  meta.json 로드 실패가 module top-level에서 조용히 죽지 않게 한다.
+//      submit 리스너는 부트스트랩 성패와 무관하게 항상 등록된다.
+//  F5  🟡 행정동 단위는 🔴 분석 불가로 이어지지 않는다 — dong 원자료(있으면)를
+//      보여주거나, 없으면 그 사실을 그대로 말한다.
+//  F6  🔴 분석 불가의 세 가지 원인(범위 밖 / 업종 데이터 없음 / 설정 오류)을
+//      precision.reason으로 구분해 넘긴다.
+//  F7  대안 0건일 때 "왜 0건인지"(다른 업종 자체가 없음 / 판정 실패로 제외됨 /
+//      확인했지만 더 나은 게 없었음)를 payload에 실어 render.js가 구분해 보여준다.
 
 import { matchArea, resolvePrecision } from "./locate.js";
 import { judge, FLOOR_LABELS } from "./verdict.js";
@@ -19,32 +27,84 @@ import { renderResult } from "./render.js";
 
 const PROXY = "https://sanggwon-proxy.<계정>.workers.dev";  // Task 12에서 실제 주소로 교체
 
-const NONE_PRECISION = { level: "none", badge: "🔴", label: "분석 불가" };
-
 const cache = new Map();
 const loadJson = async (path) => {
   if (!cache.has(path)) cache.set(path, fetch(path).then((r) => (r.ok ? r.json() : null)));
   return cache.get(path);
 };
 
-const meta = await loadJson("data/meta.json");
-document.getElementById("data-period").textContent = `데이터 기준: ${meta.period_label}`;
-document.getElementById("sources").textContent = `출처: ${meta.sources.join(" / ")}`;
+// --- 부트스트랩 -------------------------------------------------------
+// meta.json 로드 실패(배포 중 404 등)가 여기서 예외로 죽으면 아래
+// addEventListener("submit", ...) 등록 자체가 실행되지 않는다. 그러면
+// "분석하기" 버튼은 그냥 네이티브 폼 제출을 일으켜 페이지가 새로고침되고
+// 사용자에게는 아무 설명도 없이 입력값만 날아간다(F4). meta 로드는 반드시
+// try/catch로 감싸고, submit 리스너는 그 성패와 무관하게 항상 등록한다.
+let meta = null;
+let bootError = null;
+try {
+  meta = await loadJson("data/meta.json");
+  if (!meta) throw new Error("데이터를 불러오지 못했습니다(404). 잠시 후 새로고침해 주세요.");
+} catch (err) {
+  bootError = err;
+  console.error("부트스트랩 실패:", err.message);
+}
 
-// 개정 (가): 실제 assets 구성. data/domain/*.json fetch는 브라우저에서
-// 도달 불가(web/이 서비스 루트)이므로 쓰지 않는다. startupFilter 없음 —
-// 개정 (나): 창업 필터(필터 ①)는 폐기됐다.
-const assets = {
-  groups: Object.fromEntries(meta.industries.map((i) => [i.code, i.group])),
-  floorTable: meta.floor_config.coefficients,
-  warnBelow: meta.floor_config.warn_below,
-  minCoefficient: meta.floor_config.min_coefficient,
-};
+const periodEl = document.getElementById("data-period");
+const sourcesEl = document.getElementById("sources");
+const provisionalEl = document.getElementById("provisional-notice");
+
+let assets = null;
+if (meta) {
+  if (periodEl) periodEl.textContent = `데이터 기준: ${meta.period_label}`;
+  if (sourcesEl) sourcesEl.textContent = `출처: ${meta.sources.join(" / ")}`;
+
+  // meta.provisional: true는 "floor_config의 계수가 아직 실측이 아니라
+  // 잠정값"이라는 뜻이다(현재 6개 그룹 전부 1.0). 이걸 화면이 말하지
+  // 않으면 사용자는 층수 보정이 실제로 작동하고 있다고 오해한다 — 이
+  // 알림은 동시에 "잠정 계수인 채로 배포됐다"를 눈에 띄게 만드는 배포
+  // 안전장치이기도 하다(리뷰 F2).
+  if (provisionalEl && meta.provisional) {
+    provisionalEl.hidden = false;
+    provisionalEl.textContent =
+      `⚠ 이 서비스의 층수 보정 계수는 아직 잠정값입니다(기준: ${meta.floor_basis ?? "heuristic"}). ` +
+      "등급에 층수 효과가 실제로는 반영되지 않고 있을 수 있습니다.";
+  }
+
+  assets = {
+    groups: Object.fromEntries(meta.industries.map((i) => [i.code, i.group])),
+    floorTable: meta.floor_config.coefficients,
+    warnBelow: meta.floor_config.warn_below,
+    minCoefficient: meta.floor_config.min_coefficient,
+  };
+} else if (periodEl) {
+  periodEl.textContent = "데이터를 불러오지 못했습니다. 새로고침해 주세요.";
+}
 
 // 업종 매핑: Task 12까지는 이름 부분일치 폴백만 쓴다 (스펙 10.2 입구 폴백).
+// 정확히 일치하면 그걸 우선한다 — datalist가 실제 업종명을 보여주므로
+// 대부분의 정상 입력은 여기서 끝난다. 아주 짧은 입력(길이<2)은 부분일치를
+// 시도하지 않는다 — "점" 한 글자가 "한식음식점" 등 거의 모든 음식점류와
+// 매치되는 것처럼, 부분일치가 오탐을 낼 위험이 커진다.
 function mapIndustry(text) {
-  const q = text.trim();
+  if (!meta) return null;
+  const q = (text ?? "").trim();
+  if (!q) return null;
+  const exact = meta.industries.find((i) => i.name === q);
+  if (exact) return exact;
+  if (q.length < 2) return null;
   return meta.industries.find((i) => i.name.includes(q) || q.includes(i.name)) ?? null;
+}
+
+// datalist: 사용자가 실제로 존재하는 업종명을 볼 수 있게 한다 — 폼이
+// 광고하는 예시 입력이 전부 실패하던 문제(리뷰 F11)의 근본 대응. 정적
+// 목록이라 별도 의존성이 없다.
+const industryList = document.getElementById("industry-options");
+if (industryList && meta) {
+  for (const industry of meta.industries) {
+    const option = document.createElement("option");
+    option.value = industry.name;
+    industryList.append(option);
+  }
 }
 
 async function geocode(address) {
@@ -54,6 +114,10 @@ async function geocode(address) {
 }
 
 export async function analyze({ address, industryText, floor }) {
+  if (!meta || !assets) {
+    throw new Error(bootError?.message ?? "서비스 초기화에 실패했습니다. 새로고침해 주세요.");
+  }
+
   const industry = mapIndustry(industryText);
   if (!industry) throw new Error("업종을 인식하지 못했습니다. 목록에서 선택해 주세요.");
 
@@ -68,22 +132,51 @@ export async function analyze({ address, industryText, floor }) {
 
   const matched = boundary ? matchArea({ lng, lat }, boundary) : null;
   const precision = resolvePrecision({ area: matched, dongData, dongCode });
+
   const base = {
     precision, industryName: industry.name, floorLabel: FLOOR_LABELS[floor],
-    areaName: matched?.name ?? "해당 지역", verdict: null, narration: null, alternatives: [],
+    verdict: null, narration: null, alternatives: [],
   };
-  if (precision.level !== "area") return base;
+
+  // F5: 🟡 행정동 단위는 🔴 분석 불가로 이어지지 않는다. resolvePrecision이
+  // "dong"을 돌려줬다는 건 상권 폴리곤 밖이지만 그 행정동의 원자료(dong/*.json)는
+  // 있다는 뜻이다 — 등급을 지어낼 수는 없지만, 있는 원자료(월 매출 총액)는
+  // 보여줄 수 있다. dong 데이터에는 상권명/행정동명이 없어(구조 확인함) 이름을
+  // 지어내는 대신 구 이름 + 행정동코드를 그대로 보여준다.
+  if (precision.level === "dong") {
+    const guName = meta.gu?.[gu] ?? gu;
+    const dongEntry = dongData?.dongs?.[dongCode];
+    const salesTotal = dongEntry?.industries?.[industry.code]?.sales_total ?? null;
+    return {
+      ...base,
+      areaName: `${guName} 일대`,
+      dongInfo: { guName, dongCode, salesTotal },
+    };
+  }
+
+  if (precision.level !== "area") {
+    // resolvePrecision이 직접 돌려주는 "none"은 폴리곤도 행정동 데이터도
+    // 둘 다 없는 경우뿐이다 — "제공 데이터 범위 밖"이라는 설명이 정확하다.
+    return { ...base, areaName: "해당 지역", precision: { ...precision, reason: "out_of_bounds" } };
+  }
 
   const area = scores.areas[matched.code];
   const entry = area?.industries?.[industry.code];
   if (!entry || entry.base == null) {
-    return { ...base, precision: NONE_PRECISION };
+    // F6: 상권은 찾았는데(matched 존재) 이 업종의 경쟁축 데이터가 없는
+    // 경우다(base===null, 실데이터 365/21,188행). "제공 데이터 범위 밖"이
+    // 아니라 "이 상권은 맞는데 이 업종 데이터가 없다"는 다른 사실이다.
+    return {
+      ...base,
+      areaName: area?.name ?? matched.name,
+      areaType: area?.area_type ?? null,
+      precision: { level: "none", badge: "🔴", label: "분석 불가", reason: "no_data" },
+    };
   }
 
   // 개정 (라): judge()는 entry.base===null이거나 group/floor가 floorTable에
   // 없으면 던진다. 위에서 entry.base는 미리 걸렀지만, group/floor 매핑 결함은
-  // 여기서만 잡을 수 있다 — 잡지 않으면 페이지가 죽고, 삼키면 없는 등급을
-  // 지어내는 셈이 된다.
+  // 여기서만 잡을 수 있다.
   let verdict;
   try {
     verdict = judge({
@@ -92,7 +185,15 @@ export async function analyze({ address, industryText, floor }) {
     });
   } catch (err) {
     console.error("judge() 실패 — 분석 불가로 표시:", err.message);
-    return { ...base, precision: NONE_PRECISION };
+    // F6: 이건 사용자 입력 문제도 데이터 결측도 아니라 배포 설정 오류다 —
+    // "제공 데이터 범위 밖"이라고 하면 사용자가 잘못된 결론(이 지역엔 아예
+    // 데이터가 없다)을 내린다. 원인을 구분해서 넘긴다.
+    return {
+      ...base,
+      areaName: area.name,
+      areaType: area.area_type,
+      precision: { level: "none", badge: "🔴", label: "분석 불가", reason: "config_error" },
+    };
   }
 
   const narration = templateNarration({
@@ -100,8 +201,7 @@ export async function analyze({ address, industryText, floor }) {
   });
 
   // 개정 (다): 배열이 아니라 {recommendations, skipped}다. skipped는
-  // 조용히 버리지 않는다 — console.warn으로 남긴다(브리핑이 사전 승인한
-  // 최소 처리).
+  // 조용히 버리지 않는다 — console.warn으로 남긴다.
   const { recommendations, skipped } = recommend({
     area, meta, assets, floor, askedCode: industry.code,
   });
@@ -109,25 +209,48 @@ export async function analyze({ address, industryText, floor }) {
     console.warn(`대안 후보 ${skipped.length}건이 판정 실패로 제외됨:`, skipped);
   }
 
-  return { ...base, areaName: area.name, verdict, narration, alternatives: recommendations };
+  // F7: recommendations가 0건일 때, "다른 업종 자체가 이 상권에 없다"와
+  // "있었는데 판정 실패로 다 빠졌다"와 "있었는데 이 자리엔 안 맞았다"는
+  // 서로 다른 사실이다. render.js가 이 셋을 구분해 보여줄 수 있도록
+  // 개수를 실어 보낸다 — console.warn만으로는 화면에 흔적이 안 남는다.
+  const otherCount = Object.keys(area.industries ?? {}).filter((c) => c !== industry.code).length;
+
+  return {
+    ...base, areaName: area.name, areaType: area.area_type,
+    verdict, narration, alternatives: recommendations,
+    alternativesContext: { otherCount, skippedCount: skipped.length },
+  };
 }
 
-document.getElementById("query").addEventListener("submit", async (event) => {
+const form = document.getElementById("query");
+const root = document.getElementById("result");
+
+// submit 리스너는 부트스트랩 성패와 무관하게 항상 등록한다(F4) — 이게
+// 등록되지 않으면 버튼 클릭이 네이티브 폼 제출(페이지 새로고침, 입력값
+// 소실)로 새어나간다. analyze()가 meta 없음을 자체적으로 던지므로 이
+// 핸들러의 catch가 그대로 처리한다.
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.target);
-  const root = document.getElementById("result");
   try {
-    renderResult(root, await analyze({
-      address: form.get("address"),
-      industryText: form.get("industry"),
-      floor: form.get("floor"),
-    }));
+    const data = new FormData(event.target);
+    const payload = await analyze({
+      address: data.get("address"),
+      industryText: data.get("industry"),
+      floor: data.get("floor"),
+    });
+    renderResult(root, payload);
+    root.removeAttribute("role");
   } catch (error) {
     root.hidden = false;
     root.replaceChildren();
     const p = document.createElement("p");
     p.className = "error";
+    p.setAttribute("role", "alert");
     p.textContent = error.message;
     root.append(p);
   }
+  // F9: 결과가 갱신됐다는 걸 스크린리더 사용자에게도 전달한다 — 포커스가
+  // 버튼에 그대로 남아있으면 결과 영역까지 다시 탐색해야 한다. #result는
+  // index.html에서 tabindex="-1"로 프로그램적 포커스를 받을 수 있게 했다.
+  if (typeof root.focus === "function") root.focus();
 });
