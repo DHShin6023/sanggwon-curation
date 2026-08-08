@@ -4,8 +4,8 @@
 """
 import pandas as pd
 
-from etl.adapters.schema import (AREA_COLUMNS, AREA_TYPES, INDUSTRY_COLUMNS,
-                                 Normalized)
+from etl.adapters.schema import (AREA_COLUMNS, AREA_TYPES, DONG_COLUMNS,
+                                 INDUSTRY_COLUMNS, Normalized)
 from etl.sources import seoul_api
 
 _PERIOD = "STDR_YYQU_CD"
@@ -139,4 +139,14 @@ def normalize() -> Normalized:
     ind["weekday_ratio"] = weekday.div(both.where(both > 0)).fillna(0.5).values
 
     industries = ind.reindex(columns=INDUSTRY_COLUMNS).reset_index(drop=True)
-    return Normalized(areas=areas, industries=industries, period=period, region="seoul")
+
+    # ── 행정동 단위 (상권 밖 주소용 🟡 폴백) ──
+    dong_src = _at(seoul_api.load("dong_sales"), period)
+    dongs = pd.DataFrame({
+        "dong_code": dong_src["ADSTRD_CD"].astype(str).str.zfill(8),
+        "industry_code": dong_src["SVC_INDUTY_CD"].astype(str),
+        "sales_total": _num(dong_src["THSMON_SELNG_AMT"]),
+    }).reindex(columns=DONG_COLUMNS).reset_index(drop=True)
+
+    return Normalized(areas=areas, industries=industries, dongs=dongs,
+                      period=period, region="seoul")

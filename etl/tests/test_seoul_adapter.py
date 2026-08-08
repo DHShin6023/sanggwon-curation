@@ -163,10 +163,18 @@ def test_population_aggregation_uses_min_count_to_avoid_false_zero(monkeypatch):
         "OPR_SALE_MT_AVRG": [12.0, 12.0],
     })
 
+    dong_sales = pd.DataFrame({
+        "STDR_YYQU_CD": [period, period],
+        "ADSTRD_CD": ["11110101", "11110101"],
+        "SVC_INDUTY_CD": ["CS001", "CS002"],
+        "THSMON_SELNG_AMT": [1000.0, 2000.0],
+    })
+
     fakes = {
         "sales": sales, "stores": stores, "area": area,
         "resident": resident, "worker": worker,
         "footfall": footfall, "change": change,
+        "dong_sales": dong_sales,
     }
 
     def fake_load(dataset: str) -> pd.DataFrame:

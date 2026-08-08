@@ -63,11 +63,19 @@ INDUSTRY_COLUMNS = [
 TIME_COLUMNS = [c for c in INDUSTRY_COLUMNS if c.startswith("time_")]
 AGE_COLUMNS = [c for c in INDUSTRY_COLUMNS if c.startswith("age_")]
 
+# 행정동 단위 매출 — 상권 밖 주소(🟡 행정동 단위)용 폴백
+DONG_COLUMNS = [
+    "dong_code",       # str  행정동코드 8자리
+    "industry_code",   # str
+    "sales_total",     # float 분기 추정매출 총액
+]
+
 
 @dataclass(frozen=True)
 class Normalized:
     """어댑터의 출력. 엔진은 이것만 받는다."""
     areas: pd.DataFrame        # AREA_COLUMNS
     industries: pd.DataFrame   # INDUSTRY_COLUMNS
+    dongs: pd.DataFrame        # DONG_COLUMNS
     period: str                # "20261" 형식 (년4자리 + 분기1자리)
     region: str                # "seoul"

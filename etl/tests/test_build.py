@@ -1,6 +1,6 @@
 import json
 
-from etl.config import SEOUL_GU, WEB_DATA_DIR
+from etl.config import ROOT, SEOUL_GU, WEB_DATA_DIR
 from etl import build
 
 
@@ -61,6 +61,51 @@ def test_unknown_patterns_are_not_reported_as_absent():
                 assert not set(entry["patterns"]) & set(entry["patterns_unknown"])
                 found |= bool(entry["patterns_unknown"])
     assert found, "patterns_unknown이 전부 비었다 — 전달이 끊긴 것 아닌가"
+
+
+def test_dong_industry_codes_are_all_named():
+    """meta에 없는 업종코드가 폴백에 뜨면 화면에 코드가 그대로 노출된다.
+    실측: dong_sales에만 있는 CS200036이 이름 없이 나가고 있었다."""
+    meta = json.loads((WEB_DATA_DIR / "meta.json").read_text(encoding="utf-8"))
+    known = {i["code"] for i in meta["industries"]}
+    for path in (WEB_DATA_DIR / "dong").glob("*.json"):
+        for dong in json.loads(path.read_text(encoding="utf-8"))["dongs"].values():
+            unknown = set(dong["industries"]) - known
+            assert not unknown, f"{path.name}: meta에 없는 업종 {sorted(unknown)}"
+
+
+def test_build_does_not_leak_source_field_names():
+    """build.py가 서울 원본 필드명을 쓰면 어댑터 계약이 무의미해지고
+    경기 어댑터를 붙이는 순간 깨진다."""
+    source = (ROOT / "etl" / "build.py").read_text(encoding="utf-8")
+    for leaked in ("ADSTRD_CD", "SVC_INDUTY_CD", "STDR_YYQU_CD",
+                   "THSMON_SELNG_AMT", "TRDAR_CD"):
+        assert leaked not in source, f"원본 필드명 누출: {leaked}"
+
+
+def test_every_boundary_area_has_a_score_entry():
+    """경계 폴리곤에만 있고 score에 없는 상권이 있으면, Task 8이 주소를 그
+    폴리곤 안으로 매칭해 놓고 데이터를 못 찾는다. 실측 1,650 vs 1,564로
+    86개가 비어 있었다 — 매출 데이터 없는 상권은 빈 껍데기로라도 나가야 한다."""
+    for path in (WEB_DATA_DIR / "boundary").glob("*.json"):
+        boundary_codes = {a["code"] for a in json.loads(
+            path.read_text(encoding="utf-8"))["areas"]}
+        score_path = WEB_DATA_DIR / "score" / path.name
+        assert score_path.exists(), f"{path.name} 경계는 있는데 score가 없다"
+        score_codes = set(json.loads(
+            score_path.read_text(encoding="utf-8"))["areas"])
+        missing = boundary_codes - score_codes
+        assert not missing, f"{path.name}: score에 없는 상권 {sorted(missing)[:5]}"
+
+
+def test_json_is_parseable_by_strict_parsers():
+    """json.dumps는 Infinity를 그대로 쓰는데 브라우저 JSON.parse는 거부한다.
+    자치구 파일 하나가 통째로 안 열리고, 로컬 파이썬 테스트는 멀쩡히 통과한다."""
+    def reject(value):
+        raise AssertionError(f"JSON 표준 밖의 값: {value}")
+
+    for path in WEB_DATA_DIR.rglob("*.json"):
+        json.loads(path.read_text(encoding="utf-8"), parse_constant=reject)
 
 
 def test_no_percentage_success_field_anywhere():

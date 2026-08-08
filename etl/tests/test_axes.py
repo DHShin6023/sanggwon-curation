@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from etl.adapters.schema import AGE_COLUMNS, INDUSTRY_COLUMNS, TIME_COLUMNS, Normalized
+from etl.adapters.schema import (AGE_COLUMNS, DONG_COLUMNS, INDUSTRY_COLUMNS,
+                                 TIME_COLUMNS, Normalized)
 from etl.engine import axes
 
 
@@ -40,6 +41,7 @@ def _fixture() -> Normalized:
     return Normalized(
         areas=pd.DataFrame(area_rows),
         industries=pd.DataFrame(ind_rows)[INDUSTRY_COLUMNS],
+        dongs=pd.DataFrame(columns=DONG_COLUMNS),
         period="20261", region="seoul",
     )
 
