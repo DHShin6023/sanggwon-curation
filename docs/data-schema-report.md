@@ -80,15 +80,37 @@ AGRDE_{10,20,30,40,50}_SELNG_AMT, AGRDE_60_ABOVE_SELNG_AMT
 
 ---
 
-## SHP 분기 판정
+## SHP 분기 판정 — ✅ 분기 A 확정
 
-- [ ] **분기 A — 폴리곤 확보.** `data/raw/seoul_area_shp/` 에 `.shp`/`.dbf`/`.shx`/`.prj` 존재.
-      → Task 3은 `_load_polygon()` 경로로 구현. `requirements-geo.txt` 설치 필요.
-- [ ] **분기 B — 폴리곤 없음.** `TbgisTrdarRelm`의 중심점 + `RELM_AR`만 사용.
-      → Task 3은 `_load_circle()` 경로로 구현. 등가반경 = √(면적/π).
+- [x] **분기 A — 폴리곤 확보.** `data/raw/seoul_area_shp/seoul_area.{shp,dbf,shx,prj,cpg}`
+      → Task 3은 폴리곤 경로(`point-in-polygon`)로 구현. `requirements-geo.txt` 설치 완료.
+- [ ] ~~분기 B — 등가반경 원 근사~~ → 불필요
 
-판정일: ____
-판정 근거: ____
+**판정일:** 2026-08-08
+**출처:** [OA-15560](https://data.seoul.go.kr/dataList/OA-15560/S/1/datasetView.do)
+파일내려받기 → `서울시상권분석서비스(영역-상권).zip` (2.07MB, 수정일 2023.10.23)
 
-**미확정 상태.** OA-15560 페이지의 SHP 첨부 유무를 신동환이 확인해야 한다.
-API로는 해결되지 않음이 확정됐다 (`TbgisTrdarRelm` 11필드에 폴리곤 없음).
+### 검증 결과
+
+| 항목 | 결과 |
+|---|---|
+| 도형 | Polygon 1,561 + MultiPolygon 89 = **1,650개** |
+| CRS | `.prj`에서 자동 인식 — **EPSG:5181** (Korea 2000 / Central Belt). 페이지 명시와 일치 |
+| **상권코드 일치율** | **100.0%** — API `TbgisTrdarRelm` 1,650개와 완전 일치. 한쪽에만 있는 코드 0건 |
+| 중심점 정합성 | 폴리곤 중심 vs API `XCNTS_VALUE`/`YDNTS_VALUE` 거리 **중앙값 0.4m** (95%tile 63m, 최대 295m — 오목한 형상에서 무게중심과 대표점이 벌어지는 정상 범위) |
+| 인코딩 | UTF-8 (`.cpg`) |
+
+파일 수정일이 2023년이라 「2026-07-03 표준단위구역 전환」으로 코드 체계가 어긋날
+가능성을 우려했으나, **코드 일치율 100%로 문제없음이 확인됐다.**
+
+### DBF 컬럼명 주의
+
+Shapefile 규격상 DBF 컬럼명이 **10자로 잘린다.**
+
+```
+TRDAR_SE_C, TRDAR_SE_1, TRDAR_CD, TRDAR_CD_N, XCNTS_VALU,
+YDNTS_VALU, SIGNGU_CD, SIGNGU_CD_, ADSTRD_CD, ADSTRD_CD_, RELM_AR
+```
+
+`TRDAR_CD`는 온전하지만 접두어 매칭(`startswith("TRDAR")`)으로 찾으면
+`TRDAR_SE_C`가 먼저 잡힌다. **정확한 컬럼명으로 지정할 것.**

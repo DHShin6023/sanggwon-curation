@@ -907,15 +907,23 @@ PY
 ```
 
 ```python
-"""상권 경계 생성. 원본이 폴리곤(SHP)이므로 point-in-polygon 매칭용 링을 내보낸다."""
+"""상권 경계 생성. 원본이 폴리곤(SHP)이므로 point-in-polygon 매칭용 링을 내보낸다.
+
+실측(2026-08-08): 1,650개 도형(Polygon 1,561 + MultiPolygon 89), CRS는 .prj에서
+EPSG:5181로 자동 인식됨. API의 상권코드와 100% 일치.
+"""
 import geopandas as gpd
 
 from etl.config import RAW_DIR, SEOUL_GU
 from etl.adapters import seoul
 
 MODE = "polygon"
-SOURCE_CRS = "EPSG:5181"   # ← Step 3 실측값으로 교체
+SOURCE_CRS = "EPSG:5181"    # .prj가 없을 때만 쓰는 폴백. 실물에는 .prj가 있다
 SIMPLIFY_TOLERANCE_M = 5.0  # 5m — 상권 매칭 정확도에 영향 없고 용량은 크게 준다
+
+# ⚠️ Shapefile의 DBF는 컬럼명을 10자로 자른다(TRDAR_SE_CD → TRDAR_SE_C).
+#    접두어로 찾으면 TRDAR_SE_C가 먼저 잡히므로 정확한 이름으로 지정한다.
+CODE_COLUMN = "TRDAR_CD"
 
 
 def build() -> dict[str, dict]:
@@ -926,8 +934,9 @@ def build() -> dict[str, dict]:
     gdf["geometry"] = gdf.geometry.simplify(SIMPLIFY_TOLERANCE_M, preserve_topology=True)
     gdf = gdf.to_crs("EPSG:4326")
 
-    code_col = next(c for c in gdf.columns if "코드" in c or c.upper().startswith("TRDAR"))
-    gdf["area_code"] = gdf[code_col].astype(str)
+    if CODE_COLUMN not in gdf.columns:
+        raise KeyError(f"{CODE_COLUMN} 없음. 실제 컬럼: {list(gdf.columns)}")
+    gdf["area_code"] = gdf[CODE_COLUMN].astype(str)
 
     meta = seoul.normalize().areas.set_index("area_code")
     buckets: dict[str, dict] = {}
