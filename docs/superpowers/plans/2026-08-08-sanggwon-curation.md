@@ -1108,6 +1108,45 @@ def test_percentile_preserves_missing():
     assert out.isna().sum() == 1
 
 
+def test_percentile_of_single_sample_is_missing():
+    """표본 1개로는 순위가 정의되지 않는다. 50점을 주면 '정확히 중간'이라는
+    없는 정보를 지어내는 것이고 진짜 중앙값과 구분할 수 없게 된다."""
+    assert axes.percentile(pd.Series([7.0])).isna().all()
+    assert axes.percentile(pd.Series([7.0, np.nan])).isna().all()
+
+
+def test_backing_population_missing_does_not_become_zero():
+    """인구 한쪽만 결측인 상권을 0명으로 채우면 배후가 과소집계돼 경쟁축이
+    부당하게 깎인다. 실측: 그런 상권 20곳(업종행 95개), 김포공항역은 이 탓에
+    21,188행 중 최하위(0.6점)로 찍혔었다. 채우지 말고 결측으로 전파한다."""
+    data = _fixture()
+    data.areas.loc[data.areas["area_code"] == "A", "resident_pop"] = np.nan
+    out = axes.score(data).set_index(["area_code", "industry_code"])
+    assert pd.isna(out.at[("A", "CS100001"), "competition"])
+    # 대조군: 인구가 멀쩡한 상권은 그대로 계산된다
+    assert not pd.isna(out.at[("B", "CS100001"), "competition"])
+
+
+def test_competition_is_missing_when_either_component_is():
+    """경쟁축은 필수 축이라 구성요소 하나만 없어도 NaN이다 (2026-08-08 결정).
+
+    점포수 0인 253행은 '매출은 잡히는데 점포수가 0'인 원본 불일치다. 밀도만으로
+    채점하면 데이터 결함이 '경쟁자 없음'이라는 호재로 둔갑한다. Task 5가 이 행의
+    등급을 보류한다.
+    """
+    data = _fixture()
+    data.industries.loc[data.industries["area_code"] == "A", "sales_per_store"] = np.nan
+    out = axes.score(data).set_index(["area_code", "industry_code"])
+    assert pd.isna(out.at[("A", "CS100001"), "competition"])
+
+
+def test_pool_size_is_emitted():
+    """Task 5가 얇은 풀의 등급을 보류하려면 표본 크기를 알아야 한다."""
+    out = axes.score(_split_pools())
+    # 픽스처: 골목 A·B / 광역 C·D, 업종 2개 → 모든 풀이 2행
+    assert set(out["pool_size"]) == {2}
+
+
 def test_demand_axes_are_not_merged():
     """수요축은 3개 원점수로 남아야 한다. 미리 합치면 업종별 가중이 불가능해진다."""
     out = axes.score(_fixture())
@@ -1230,18 +1269,32 @@ import pandas as pd
 from etl.adapters.schema import AGE_COLUMNS, TIME_COLUMNS, Normalized
 
 OUTPUT_COLUMNS = [
-    "area_code", "industry_code", "area_type",
+    "area_code", "industry_code", "area_type", "pool_size",
     "demand_raw_resident", "demand_raw_worker", "demand_raw_footfall",
     "competition", "vitality", "fit",
 ]
 
 
 def percentile(series: pd.Series) -> pd.Series:
-    """0~100 백분위. 결측은 결측으로 남긴다 — 없는 값을 평균으로 채우지 않는다."""
+    """풀 안에서의 0~100 순위 점수. 결측은 결측으로 남긴다.
+
+    pandas의 rank(pct=True)는 rank/n이라 최솟값이 0이 아니라 1/n이 된다
+    (n=4면 25,50,75,100). 여기서는 (rank-1)/(n-1)로 직접 정규화해 풀 크기와
+    무관하게 0~100 전 구간을 채운다 — 등급컷이 업종 단위 하나뿐이라(Task 5)
+    서로 다른 크기의 풀에서 나온 점수가 같은 자로 재어져야 하기 때문이다.
+    rank/n을 쓰면 3행짜리 풀의 평균이 67점, 200행짜리 풀은 50점이 되어
+    작은 풀이 통째로 유리해진다.
+
+    표본이 1개뿐이면 순위 자체가 정의되지 않는다. 50.0을 주면 "정확히 중간"이라는
+    없는 정보를 지어내는 것이고 다운스트림에서 진짜 중앙값과 구분되지 않으므로
+    결측으로 남긴다(Global Constraint: 평균·0·임의값으로 채우지 않는다).
+    """
     numeric = pd.to_numeric(series, errors="coerce")
-    if numeric.notna().sum() <= 1:
-        return pd.Series(np.where(numeric.notna(), 50.0, np.nan), index=series.index)
-    return numeric.rank(pct=True, na_option="keep") * 100.0
+    n = numeric.notna().sum()
+    if n <= 1:
+        return pd.Series(np.nan, index=series.index, dtype=float)
+    ranks = numeric.rank(method="average", na_option="keep")
+    return (ranks - 1) / (n - 1) * 100.0
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -1282,12 +1335,26 @@ def score(data: Normalized) -> pd.DataFrame:
     out = ind[["area_code", "industry_code", "area_type"]].copy()
     out = out.join(demand, on="area_code")
 
+    # 풀이 얇으면 순위 점수가 잡음이다 — n=3이면 가능한 값이 0/50/100 셋뿐이다.
+    # 실측 18개 풀(92행)이 10행 미만. 어느 선부터 신뢰하지 않을지는 제품 판단이라
+    # 여기서는 자르지 않고 표본 크기를 실어 보내고, Task 5/웹이 판단한다.
+    out["pool_size"] = ind.groupby(
+        ["industry_code", "area_type"])["area_code"].transform("size")
+
     # ── ② 경쟁: 점포당매출(↑) + 배후 대비 점포밀도(↓) ──
     sales_rank = by_pool(ind["sales_per_store"])
 
-    backing = areas["resident_pop"].fillna(0) + areas["worker_pop"].fillna(0)
+    # 한쪽 인구만 결측일 때 0으로 채우면 배후가 과소집계되어 밀도가 부풀고
+    # 경쟁축이 일방적으로 깎인다. 실측: 한쪽만 결측인 상권 20곳(업종행 95개),
+    # 그중 김포공항역(3120115)은 상주인구 결측을 0으로 채운 탓에 경쟁축이
+    # 21,188행 중 최하위(0.6점)로 찍혔다. 없는 인구를 0명이라고 하지 않는다.
+    backing = areas["resident_pop"] + areas["worker_pop"]
     density = ind["store_count"] / ind["area_code"].map(backing).replace(0, np.nan)
     density_rank = 100.0 - by_pool(density)
+    # 두 구성요소 중 하나라도 없으면 경쟁축은 NaN이다 — 재정규화하지 않는다.
+    # 특히 sales_per_store 결측 253행은 "매출은 잡히는데 점포수가 0"인 원본
+    # 불일치라, 밀도만으로 채점하면 데이터 결함이 "경쟁자 없음"이라는 호재로
+    # 둔갑한다. 경쟁축은 필수 축이고, 없으면 Task 5가 등급을 보류한다.
     out["competition"] = (sales_rank * 0.6 + density_rank * 0.4)
 
     # ── ③ 활력: 매출추세(↑) + 폐업률(↓) + 평균영업개월(↑) + 점포증감(↓) ──
@@ -1329,7 +1396,7 @@ def score(data: Normalized) -> pd.DataFrame:
 ```bash
 .venv/bin/python -m pytest etl/tests/test_axes.py -v
 ```
-Expected: 11 passed
+Expected: 16 passed
 
 전체 스위트도 함께 돌려 어댑터 계약 변경이 다른 데를 깨지 않았는지 본다:
 
@@ -1503,6 +1570,22 @@ def test_base_score_bounded():
     assert out["base_score"].between(0, 100).all()
 
 
+def test_missing_competition_withholds_the_grade():
+    """경쟁축이 없으면 등급을 내지 않는다 (2026-08-08 결정).
+
+    나머지 3축으로 등급을 내면 사용자는 경쟁 정보 없이 나온 판정임을 모른다.
+    창업 판단에서 경쟁 강도는 뺄 수 없는 축이라, 없으면 🔴 분석 불가로 보낸다.
+    """
+    df = _axis_df()
+    df.loc[0, "competition"] = float("nan")
+    out = scoring.base_score(df, _assets())
+    assert pd.isna(out.loc[0, "base_score"]), "경쟁축 없이 등급이 나왔다"
+    # 대조군: 다른 축이 빠지는 건 재정규화로 흡수한다
+    df2 = _axis_df()
+    df2.loc[0, "vitality"] = float("nan")
+    assert not pd.isna(scoring.base_score(df2, _assets()).loc[0, "base_score"])
+
+
 def test_grades_are_even_across_pools():
     """골목상권 물건지가 등급에서 눌리면 안 된다 — 서비스가 후보를 못 걸러낸다.
 
@@ -1606,8 +1689,18 @@ def load_domain() -> DomainAssets:
     )
 
 
+REQUIRED_AXIS = "competition"
+
+
 def base_score(axis_df: pd.DataFrame, assets: DomainAssets) -> pd.DataFrame:
-    """층수 미적용 가중합 (0~100). 결측 축은 가중치에서 빼고 재정규화한다."""
+    """층수 미적용 가중합 (0~100). 결측 축은 가중치에서 빼고 재정규화한다.
+
+    단 경쟁축만은 필수다(2026-08-08 결정). 창업자가 가장 알아야 할 게 경쟁 강도인데
+    그걸 빼고 낸 등급은 틀린 등급보다 위험하다. 경쟁축이 없으면 base_score를 NaN으로
+    두고, 화면은 스펙 10.3의 🔴 "분석 불가"로 표시한다(수요·활력·궁합 수치는 보여준다).
+    실측 21,188행 중 약 350행(1.7%) — 점포수 0인 원본 불일치 253행 + 배후인구
+    미집계 약 95행.
+    """
     out = axis_df.copy()
     group = out["industry_code"].map(assets.groups)
 
@@ -1622,6 +1715,7 @@ def base_score(axis_df: pd.DataFrame, assets: DomainAssets) -> pd.DataFrame:
         weight_sum += w.where(present, 0.0)
 
     out["base_score"] = (total / weight_sum.replace(0, np.nan)).clip(0, 100)
+    out["base_score"] = out["base_score"].where(out[REQUIRED_AXIS].notna())
     return out
 
 
