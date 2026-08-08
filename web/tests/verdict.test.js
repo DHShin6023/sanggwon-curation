@@ -125,6 +125,56 @@ test("judge: store_count와 sales_per_store는 없으면 0이 아니라 null로 
   assert.equal(r.salesPerStore, null);
 });
 
+// --- 리뷰 반영: 미등록 group/floor는 "계수 1.0"이 아니라 던진다 + poolSize ---
+
+test("judge: floorTable에 없는 업종군은 조용히 1.0으로 넘어가지 않고 던진다", () => {
+  const entry = { base: 60, store_count: 5, patterns: [], axes: {} };
+  assert.throws(
+    () => judge({ entry, cuts: CUTS, group: "존재하지않는그룹", floor: "F1",
+                 floorTable: FLOOR_TABLE, warnBelow: 0.75 }),
+    /존재하지않는그룹/
+  );
+});
+
+test("judge: 알려진 업종군이라도 등록되지 않은 층수는 던진다", () => {
+  const entry = { base: 60, store_count: 5, patterns: [], axes: {} };
+  const partialTable = { 유동의존형: { F1: 1.0 } }; // F2 등 나머지 층수 키가 없다
+  assert.throws(
+    () => judge({ entry, cuts: CUTS, group: "유동의존형", floor: "F2",
+                 floorTable: partialTable, warnBelow: 0.75 }),
+    /F2/
+  );
+});
+
+test("floorWarning: 미등록 업종군/층수도 null이 아니라 던진다 (judge와 동일한 결함군)", () => {
+  assert.throws(
+    () => floorWarning({ group: "존재하지않는그룹", floor: "F1",
+                         floorTable: FLOOR_TABLE, warnBelow: 0.75 }),
+    /존재하지않는그룹/
+  );
+  assert.throws(
+    () => floorWarning({ group: "유동의존형", floor: "F1",
+                         floorTable: { 유동의존형: { F2: 0.5 } }, warnBelow: 0.75 }),
+    /F1/
+  );
+});
+
+test("judge: poolSize가 entry.pool_size 그대로 전달된다", () => {
+  const r = judge({
+    entry: { base: 60, store_count: 5, patterns: [], axes: {}, pool_size: 7 },
+    cuts: CUTS, group: "유동의존형", floor: "F1", floorTable: FLOOR_TABLE, warnBelow: 0.75,
+  });
+  assert.equal(r.poolSize, 7);
+});
+
+test("judge: pool_size가 없는 entry는 poolSize가 null로 남는다", () => {
+  const r = judge({
+    entry: { base: 60, store_count: 5, patterns: [], axes: {} },
+    cuts: CUTS, group: "유동의존형", floor: "F1", floorTable: FLOOR_TABLE, warnBelow: 0.75,
+  });
+  assert.equal(r.poolSize, null);
+});
+
 // --- 실데이터 검증 ---
 
 test("실데이터: 11110.json의 정상 industry가 그럴듯한 등급을 낸다", () => {
@@ -138,6 +188,7 @@ test("실데이터: 11110.json의 정상 industry가 그럴듯한 등급을 낸�
                     floorTable: FLOOR_TABLE, warnBelow: 0.75 });
   assert.ok(GRADES.includes(r.grade));
   assert.equal(r.score, entry.base); // 1층은 이 합성 FLOOR_TABLE에서 계수 1.0
+  assert.equal(r.poolSize, entry.pool_size); // 914 — 얇은 표본 판단은 Task 11 몫
 });
 
 test("실데이터: base가 null인 industry는 judge가 던진다", () => {

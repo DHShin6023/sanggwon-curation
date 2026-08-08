@@ -47,9 +47,32 @@ export function rankLabel(score, cuts) {
   return "하위 25%";
 }
 
+// group/floor 조합의 계수를 찾는다. "이 그룹은 실제로 계수가 1.0이다"와
+// "이 그룹이 테이블에 아예 없다"는 다른 사실이다 — 후자를 전자로 읽으면
+// (예전처럼 `?? 1.0`으로 조용히 메우면) 업종→그룹 매핑 오타나 그룹명 변경,
+// 한글 키 인코딩 차이 하나가 층수 보정을 통째로 무시한 채 등급을 만들어낸다.
+// base가 null일 때 던지는 것과 같은 이유로, 여기서도 조용히 넘어가지 않고
+// 어느 키가 없는지 이름으로 집어 던진다 — 이건 사용자가 고칠 수 있는 입력이
+// 아니라 배포 설정 오류이기 때문이다.
+function floorCoefficient({ group, floor, floorTable }) {
+  const groupTable = floorTable?.[group];
+  if (groupTable === undefined) {
+    throw new Error(
+      `floorCoefficient: 알 수 없는 업종군 "${group}" — floorTable에 이 그룹이 없다 (업종→그룹 매핑 오류 가능성)`
+    );
+  }
+  const coefficient = groupTable[floor];
+  if (coefficient === undefined) {
+    throw new Error(
+      `floorCoefficient: 알 수 없는 층수 "${floor}" (업종군 "${group}") — floorTable[${group}]에 이 층수 키가 없다`
+    );
+  }
+  return coefficient;
+}
+
 export function floorWarning({ group, floor, floorTable, warnBelow }) {
-  const coefficient = floorTable?.[group]?.[floor];
-  if (coefficient === undefined || coefficient >= warnBelow) return null;
+  const coefficient = floorCoefficient({ group, floor, floorTable });
+  if (coefficient >= warnBelow) return null;
   return {
     severity: coefficient < warnBelow * 0.7 ? "critical" : "caution",
     coefficient,
@@ -69,7 +92,7 @@ export function judge({ entry, cuts, group, floor, floorTable, warnBelow }) {
   if (entry?.base === null || entry?.base === undefined) {
     throw new Error("judge: entry.base가 없어 판정할 수 없다 (경쟁축 등 필수 입력 누락 — 호출부는 등급 대신 분석 불가로 표시할 것)");
   }
-  const coefficient = floorTable?.[group]?.[floor] ?? 1.0;
+  const coefficient = floorCoefficient({ group, floor, floorTable });
   const score = applyFloor(entry.base, coefficient);
   return {
     score,
@@ -84,5 +107,10 @@ export function judge({ entry, cuts, group, floor, floorTable, warnBelow }) {
     axes: entry.axes ?? {},
     storeCount: entry.store_count ?? null,
     salesPerStore: entry.sales_per_store ?? null,
+    // pool_size: 표본이 얇으면(n=5 등) percentile이 몇 개 값만 취할 수 있어
+    // 사실상 잡음이다. patterns_unknown과 같은 이유로 judge()가 조합해서
+    // 숨기지 않고 그대로 통과시킨다 — 얇은 표본을 숨기는 게 아니라
+    // 정직하게 노출할지는 호출부(Task 11)의 판단이다.
+    poolSize: entry.pool_size ?? null,
   };
 }
