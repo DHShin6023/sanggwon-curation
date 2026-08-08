@@ -56,8 +56,8 @@ REQUIRED_COLUMNS = {
     "worker": ["STDR_YYQU_CD", "TRDAR_CD", "TOT_WRC_POPLTN_CO"],
     "change": ["STDR_YYQU_CD", "TRDAR_CD", "OPR_SALE_MT_AVRG", "TRDAR_CHNGE_IX"],
     "dong_sales": ["STDR_YYQU_CD", "ADSTRD_CD", "SVC_INDUTY_CD", "THSMON_SELNG_AMT"],
-    "area": ["TRDAR_CD", "TRDAR_CD_NM", "XCNTS_VALUE", "YDNTS_VALUE",
-             "SIGNGU_CD", "ADSTRD_CD", "RELM_AR"],
+    "area": ["TRDAR_CD", "TRDAR_CD_NM", "TRDAR_SE_CD", "XCNTS_VALUE",
+             "YDNTS_VALUE", "SIGNGU_CD", "ADSTRD_CD", "RELM_AR"],
 }
 
 

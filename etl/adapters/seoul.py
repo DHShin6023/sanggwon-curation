@@ -4,7 +4,8 @@
 """
 import pandas as pd
 
-from etl.adapters.schema import (AREA_COLUMNS, INDUSTRY_COLUMNS, Normalized)
+from etl.adapters.schema import (AREA_COLUMNS, AREA_TYPES, INDUSTRY_COLUMNS,
+                                 Normalized)
 from etl.sources import seoul_api
 
 _PERIOD = "STDR_YYQU_CD"
@@ -56,9 +57,18 @@ def normalize() -> Normalized:
 
     # ── 상권 단위 ──
     area = seoul_api.load("area")
+    area_type = area["TRDAR_SE_CD"].astype(str).str.strip().map(AREA_TYPES)
+    unknown = sorted(area.loc[area_type.isna(), "TRDAR_SE_CD"].astype(str).unique())
+    if unknown:
+        raise ValueError(
+            f"AREA_TYPES에 없는 상권구분 코드: {unknown}. 채점 풀을 정하지 못하므로 "
+            "임의로 분류하지 않는다 — schema.AREA_TYPES를 갱신할 것"
+        )
+
     areas = pd.DataFrame({
         "area_code": area[_AREA].astype(str),
         "area_name": area["TRDAR_CD_NM"].astype(str),
+        "area_type": area_type,
         "gu_code": area["SIGNGU_CD"].astype(str).str.zfill(5),
         "dong_code": area["ADSTRD_CD"].astype(str).str.zfill(8),
         "x": _num(area["XCNTS_VALUE"]),

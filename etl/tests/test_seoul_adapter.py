@@ -1,8 +1,36 @@
 import pandas as pd
+import pytest
 
 from etl.adapters import seoul
-from etl.adapters.schema import AREA_COLUMNS, INDUSTRY_COLUMNS
+from etl.adapters.schema import AREA_COLUMNS, AREA_TYPES, INDUSTRY_COLUMNS
 from etl.sources import seoul_api
+
+
+def test_area_type_covers_every_area():
+    """채점 풀 키가 비면 그 상권은 등급을 못 받는다."""
+    areas = seoul.normalize().areas
+    assert areas["area_type"].notna().all()
+    assert set(areas["area_type"]) <= set(AREA_TYPES.values())
+    counts = areas["area_type"].value_counts()
+    # 실측 2026-08-08: 골목 1,090 / 전통시장 305 / 발달 249 + 관광특구 6 = 광역 255
+    assert counts["alley"] == 1090
+    assert counts["market"] == 305
+    assert counts["metro"] == 255
+
+
+def test_unknown_area_type_raises_instead_of_guessing(monkeypatch):
+    """모르는 상권구분 코드를 임의의 풀에 넣으면 등급이 조용히 틀어진다."""
+    real = seoul_api.load
+
+    def fake_load(dataset: str) -> pd.DataFrame:
+        df = real(dataset).copy()
+        if dataset == "area":
+            df.loc[df.index[0], "TRDAR_SE_CD"] = "Z"
+        return df
+
+    monkeypatch.setattr(seoul_api, "load", fake_load)
+    with pytest.raises(ValueError, match="Z"):
+        seoul.normalize()
 
 
 def test_normalize_produces_contract_columns():
@@ -101,6 +129,7 @@ def test_population_aggregation_uses_min_count_to_avoid_false_zero(monkeypatch):
     area = pd.DataFrame({
         "TRDAR_CD": ["A001", "A002"],
         "TRDAR_CD_NM": ["상권1", "상권2"],
+        "TRDAR_SE_CD": ["A", "A"],
         "SIGNGU_CD": ["11110", "11110"],
         "ADSTRD_CD": ["11110101", "11110101"],
         "XCNTS_VALUE": [100.0, 200.0],
