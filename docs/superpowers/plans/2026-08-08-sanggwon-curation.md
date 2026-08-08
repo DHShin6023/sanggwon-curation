@@ -38,7 +38,7 @@
 sanggwon-curation/
 ├── etl/                              # Python — 사전 계산 파이프라인
 │   ├── config.py                     # 경로 상수, 자치구 목록, 기준시점
-│   ├── sources/seoul_files.py        # 원본 CSV → DataFrame + 스키마 검증
+│   ├── sources/seoul_api.py          # 서울 OpenAPI 수집 + 스키마 검증
 │   ├── adapters/schema.py            # ★ 공통 지표 형식 (어댑터↔엔진 유일한 계약)
 │   ├── adapters/seoul.py             # 서울 원본 → 공통 지표
 │   ├── geometry/boundary.py          # 상권 경계: 폴리곤 or 등가반경 원 (분기 지점)
@@ -48,7 +48,7 @@ sanggwon-curation/
 │   ├── build.py                      # 파이프라인 엔트리포인트 → web/data/ 출력
 │   └── tests/                        # pytest
 ├── data/
-│   ├── raw/                          # 원본 CSV (gitignore)
+│   ├── raw/                          # API 응답 캐시 parquet + SHP (gitignore)
 │   └── domain/                       # ★ 신동환 도메인 자산 (커밋됨)
 │       ├── industry_groups.json
 │       ├── axis_weights.json
@@ -98,12 +98,12 @@ Task 13                            (검증 세트 대조 + 도메인 자산 확�
 
 ---
 
-## Task 1: 프로젝트 뼈대 + 서울 원본 로더 + 스키마 검증 (★ 분기 확정)
+## Task 1: 프로젝트 뼈대 + 서울 OpenAPI 클라이언트 + 스키마 검증 (★ 분기 확정)
 
 **Files:**
 - Create: `etl/config.py`
-- Create: `etl/sources/seoul_files.py`
-- Create: `etl/tests/test_seoul_files.py`
+- Create: `etl/sources/seoul_api.py`
+- Create: `etl/tests/test_seoul_api.py`
 - Create: `etl/requirements.txt`
 - Create: `etl/requirements-geo.txt`
 - Create: `docs/data-schema-report.md`
@@ -114,40 +114,51 @@ Task 13                            (검증 세트 대조 + 도메인 자산 확�
 - Produces:
   - `etl.config.RAW_DIR: Path`, `etl.config.WEB_DATA_DIR: Path`, `etl.config.DOMAIN_DIR: Path`
   - `etl.config.SEOUL_GU: dict[str, str]` — 자치구코드 → 자치구명
-  - `etl.sources.seoul_files.load(dataset: str) -> pandas.DataFrame` — `dataset`은 `"sales"|"stores"|"footfall"|"resident"|"worker"|"area"|"change"|"dong_sales"` 중 하나. 원본 CSV를 읽고 `REQUIRED_COLUMNS`를 검증한 뒤 반환. 컬럼 누락 시 `SchemaError` 발생
-  - `etl.sources.seoul_files.SchemaError` — 예외 클래스
-  - `etl.sources.seoul_files.REQUIRED_COLUMNS: dict[str, list[str]]`
+  - `etl.sources.seoul_api.load(dataset, periods=None) -> pandas.DataFrame` — `dataset`은 `"sales"|"stores"|"footfall"|"resident"|"worker"|"area"|"change"|"dong_sales"`. 캐시가 있으면 캐시를, 없으면 API를 페이징 호출하고 `data/raw/{dataset}.parquet`에 저장한 뒤 반환
+  - `etl.sources.seoul_api.SchemaError`, `etl.sources.seoul_api.SERVICES`, `etl.sources.seoul_api.REQUIRED_COLUMNS`
   - `docs/data-schema-report.md`의 **「SHP 분기 판정」** 절 — Task 3이 읽는다
 
-### 사전 작업 — 신동환 수동 다운로드 (코드 아님)
+### 데이터 수집 경로: 파일 다운로드가 아니라 OpenAPI
 
-아래 파일을 브라우저로 받아 `data/raw/` 에 넣는다. 세션 기반 다운로드라 스크립트로 받을 수 없다.
+**2026-08-08 실측 확인.** 서울 열린데이터광장 OpenAPI로 필요한 8종을 전부 가져올 수 있다.
+파일 다운로드는 세션 기반이라 자동화가 불가능하지만 **API는 인증키만 있으면 CI에서도 돈다.**
 
-| 저장 파일명 (접두어) | 출처 |
-|---|---|
-| `seoul_sales_*.csv` | [추정매출-상권 OA-15572](https://data.seoul.go.kr/dataList/OA-15572/S/1/datasetView.do) |
-| `seoul_stores_*.csv` | [점포-상권 OA-15577](https://data.seoul.go.kr/dataList/OA-15577/S/1/datasetView.do) |
-| `seoul_footfall_*.csv` | [길단위인구-상권 OA-15568](https://data.seoul.go.kr/dataList/OA-15568/S/1/datasetView.do) |
-| `seoul_resident_*.csv` | [상주인구-상권 OA-15584](https://data.seoul.go.kr/dataList/OA-15584/S/1/datasetView.do) |
-| `seoul_worker_*.csv` | [직장인구-상권 OA-22184](https://data.seoul.go.kr/dataList/OA-22184/S/1/datasetView.do) |
-| `seoul_area_*.csv` | [영역-상권 OA-15560](https://data.seoul.go.kr/dataList/OA-15560/S/1/datasetView.do) |
-| `seoul_change_*.csv` | [상권변화지표 OA-15576](https://data.seoul.go.kr/dataList/OA-15576/S/1/datasetView.do) |
-| `seoul_dong_sales_*.csv` | [추정매출-행정동 OA-22175](https://data.seoul.go.kr/dataList/OA-22175/S/1/datasetView.do) |
-| `seoul_area_shp/` (있으면) | 영역-상권 페이지의 **SHP(공간영역)** 첨부 |
+- 호스트: `http://openapi.seoul.go.kr:8088`
+- 형식: `/{인증키}/json/{서비스명}/{시작행}/{끝행}/{필터...}`
+- **1회 최대 1,000행.** `끝행 - 시작행 ≤ 1000`
+- 샘플키 `sample`은 5행까지만 — 개발 중 스키마 확인에만 쓴다
 
-**★ 연도별로 최소 2년치를 받는다.** `sales_trend`(전년 동분기 대비 증감)를 계산하려면
-최신 분기와 그 4분기 전이 모두 필요하다. 1년치만 받으면 활력축이 통째로 결측이 된다.
-따라서 `seoul_sales_2025.csv`, `seoul_sales_2026.csv` 처럼 연도 접미어를 붙여 저장하고
-로더가 접두어로 glob 하여 이어붙인다. `area`는 시점이 없으므로 1개만 있어도 된다.
+| dataset | 서비스명 | 분기 필터 | 확인된 행수 |
+|---|---|---|---|
+| `sales` | `VwsmTrdarSelngQq` | ✅ | 전체 460,329 / 분기당 ~21,200 |
+| `stores` | `VwsmTrdarStorQq` | ✅ | 전체 1,604,844 / 분기당 ~76,000 |
+| `footfall` | `VwsmTrdarFlpopQq` | ✅ | 전체 34,633 / 분기당 ~1,650 |
+| `resident` | `VwsmTrdarRepopQq` | ❌ **무시됨** | 전체 34,275 — 전량 받고 pandas에서 거른다 |
+| `worker` | `VwsmTrdarWrcPopltnQq` | ❌ **무시됨** | 전체 34,386 — 동일 |
+| `change` | `VwsmTrdarIxQq` | ✅ | 분기당 1,650 |
+| `dong_sales` | `VwsmAdstrdSelngW` | ✅ | 분기당 ~16,700 |
+| `area` | `TbgisTrdarRelm` | — (시점 없음) | 1,650 |
 
-인코딩은 `cp949`(EUC-KR)일 가능성이 높으나 확정 아님 — Step 3에서 실측한다.
+**필요 분기는 2개** — 최신 분기와 그 4분기 전. `sales_trend`(전년 동분기 대비 증감)를
+계산하려면 둘 다 있어야 하고, 하나만 받으면 활력축이 통째로 결측이 된다.
+**총 호출량 약 310회**로 하루치 쿼터 안에 들어간다.
+
+### 사전 작업 — 신동환 수동 작업 (2건)
+
+1. **API 인증키 발급** — <https://data.seoul.go.kr> 로그인 → Open API 인증키 신청.
+   발급된 키를 `.env`에 `SEOUL_API_KEY=...` 로 넣는다 (`.gitignore` 대상).
+2. **★ 서울 상권영역 SHP 확인** — [OA-15560](https://data.seoul.go.kr/dataList/OA-15560/S/1/datasetView.do)
+   페이지에서 `SHP`/`공간영역`/`공간정보` 첨부가 있는지 본다.
+   **API로는 해결되지 않는 유일한 항목이다** — `TbgisTrdarRelm`은 중심점(`XCNTS_VALUE`/
+   `YDNTS_VALUE`)과 면적(`RELM_AR`)만 주고 폴리곤 필드가 없음을 실측으로 확인했다.
+   있으면 받아서 `data/raw/seoul_area_shp/`에 `.shp/.dbf/.shx/.prj` 세트로 넣는다.
 
 - [ ] **Step 1: 뼈대와 의존성 파일 생성**
 
 ```bash
 cd ~/Desktop/ClaudeWork/sanggwon-curation
 mkdir -p etl/sources etl/adapters etl/geometry etl/engine etl/tests
-mkdir -p data/raw data/domain web/js web/tests web/css web/data worker/src
+mkdir -p data/raw data/domain web/js web/tests web/css web/data worker/src scripts
 touch etl/__init__.py etl/sources/__init__.py etl/adapters/__init__.py \
       etl/geometry/__init__.py etl/engine/__init__.py etl/tests/__init__.py
 python3 -m venv .venv
@@ -156,6 +167,8 @@ python3 -m venv .venv
 `etl/requirements.txt`:
 ```
 pandas==2.2.3
+pyarrow==18.1.0
+requests==2.32.3
 pytest==8.3.4
 ```
 
@@ -173,6 +186,7 @@ pyproj==3.7.0
 __pycache__/
 *.pyc
 .pytest_cache/
+.env
 ```
 
 ```bash
@@ -212,30 +226,15 @@ FLOOR_LABELS = {
 GRADES = ["상", "중상", "중하", "하"]
 ```
 
-- [ ] **Step 3: 실측 — 인코딩과 컬럼명을 눈으로 확인**
-
-원본의 실제 컬럼명을 모르는 상태에서 `REQUIRED_COLUMNS`를 지어내면 안 된다. 먼저 찍어본다.
+- [ ] **Step 3: 인증키 확인**
 
 ```bash
-.venv/bin/python - <<'PY'
-from pathlib import Path
-import pandas as pd
-raw = Path("data/raw")
-for f in sorted(raw.glob("*.csv")):
-    for enc in ("cp949", "utf-8-sig", "utf-8"):
-        try:
-            df = pd.read_csv(f, encoding=enc, nrows=3)
-        except (UnicodeDecodeError, LookupError):
-            continue
-        print(f"\n=== {f.name}  (encoding={enc}, {len(df.columns)}col) ===")
-        print(list(df.columns))
-        break
-    else:
-        print(f"\n=== {f.name}  ❌ 인코딩 판별 실패 ===")
-PY
+echo "SEOUL_API_KEY=발급받은키" > .env
+set -a && . ./.env && set +a
+curl -s "http://openapi.seoul.go.kr:8088/${SEOUL_API_KEY}/json/TbgisTrdarRelm/1/5/" \
+  | head -c 200
 ```
-
-출력된 실제 컬럼명을 `docs/data-schema-report.md`에 그대로 붙여넣는다. 다음 Step의 `REQUIRED_COLUMNS`는 **이 출력에서 복사**한다. 추측 금지.
+Expected: `"CODE":"INFO-000"`. `INFO-100`(인증키 오류)이나 `ERROR-3xx`가 나오면 키가 아직 승인 전이다.
 
 - [ ] **Step 4: SHP 분기 판정을 리포트에 기록**
 
@@ -259,132 +258,239 @@ ls -la data/raw/seoul_area_shp/ 2>/dev/null || echo "SHP 없음"
 
 - [ ] **Step 5: 실패하는 테스트 작성**
 
-`etl/tests/test_seoul_files.py`:
+`etl/tests/test_seoul_api.py`:
 ```python
 import pytest
-from etl.sources import seoul_files
+
+from etl.sources import seoul_api
 
 
-def test_load_returns_dataframe_with_required_columns():
-    """실제 원본 파일을 읽어 필수 컬럼이 전부 있는지 검증한다.
-    이 테스트는 목(mock)이 아니라 진짜 파일을 읽는다 — 원본 스키마가 바뀌면 여기서 터져야 한다."""
-    df = seoul_files.load("area")
-    assert len(df) > 0
-    for col in seoul_files.REQUIRED_COLUMNS["area"]:
-        assert col in df.columns, f"'{col}' 누락"
+def test_all_services_declared():
+    assert set(seoul_api.SERVICES) == set(seoul_api.REQUIRED_COLUMNS)
+    assert len(seoul_api.SERVICES) == 8
+
+
+def test_page_ranges_respect_1000_row_limit():
+    ranges = list(seoul_api.page_ranges(2500))
+    assert ranges == [(1, 1000), (1001, 2000), (2001, 2500)]
+    assert all(end - start < 1000 for start, end in ranges)
+
+
+def test_page_ranges_handles_exact_multiple():
+    assert list(seoul_api.page_ranges(2000)) == [(1, 1000), (1001, 2000)]
+
+
+def test_page_ranges_empty():
+    assert list(seoul_api.page_ranges(0)) == []
 
 
 def test_load_rejects_unknown_dataset():
     with pytest.raises(ValueError):
-        seoul_files.load("nope")
+        seoul_api.load("nope")
 
 
-def test_all_datasets_load():
-    """8개 데이터셋 전부 로드되고 스키마 검증을 통과해야 한다."""
-    for name in seoul_files.REQUIRED_COLUMNS:
-        df = seoul_files.load(name)
+def test_area_loads_with_required_columns():
+    """실제 API(또는 캐시)를 때려 필수 필드가 전부 있는지 검증한다.
+    원본 스키마가 바뀌면 여기서 터져야 한다."""
+    df = seoul_api.load("area")
+    assert len(df) > 1000
+    for col in seoul_api.REQUIRED_COLUMNS["area"]:
+        assert col in df.columns, f"'{col}' 누락"
+
+
+def test_all_datasets_load_and_validate():
+    for name in seoul_api.SERVICES:
+        df = seoul_api.load(name)
         assert len(df) > 0, f"{name} 비어 있음"
+
+
+def test_two_periods_present_for_trend():
+    """sales_trend 계산에 최신 분기와 4분기 전이 모두 필요하다."""
+    df = seoul_api.load("sales")
+    assert df["STDR_YYQU_CD"].astype(str).nunique() >= 2
 ```
 
 - [ ] **Step 6: 테스트 실패 확인**
 
 ```bash
-.venv/bin/python -m pytest etl/tests/test_seoul_files.py -v
+.venv/bin/python -m pytest etl/tests/test_seoul_api.py -v
 ```
-Expected: FAIL — `ModuleNotFoundError: No module named 'etl.sources.seoul_files'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'etl.sources.seoul_api'`
 
-- [ ] **Step 7: `etl/sources/seoul_files.py` 구현**
+- [ ] **Step 7: `etl/sources/seoul_api.py` 구현**
 
-`REQUIRED_COLUMNS`의 값은 **Step 3 출력에서 복사한 실제 컬럼명**으로 채운다. 아래는 골격이며 컬럼명 문자열은 실측값으로 교체해야 한다.
+필드명은 2026-08-08 샘플키 호출로 **실측 확인한 값**이다. 추측이 아니다.
 
 ```python
-"""서울 원본 CSV 로더. 파일 읽기와 스키마 검증만 담당하고 가공은 하지 않는다.
-가공은 adapters/seoul.py의 책임이다."""
+"""서울 열린데이터광장 OpenAPI 수집기.
+
+수집과 스키마 검증만 담당하고 가공은 하지 않는다 — 가공은 adapters/seoul.py의 책임.
+받은 원본은 data/raw/{dataset}.parquet 에 캐시해 재호출을 피한다.
+"""
+import os
+import time
 from functools import lru_cache
+from typing import Iterator
 
 import pandas as pd
+import requests
 
 from etl.config import RAW_DIR
 
+HOST = "http://openapi.seoul.go.kr:8088"
+PAGE_SIZE = 1000          # API 하드 리밋: 끝행 - 시작행 <= 1000
+NEEDED_PERIODS = 2        # 최신 분기 + 4분기 전
+
 
 class SchemaError(RuntimeError):
-    """원본 CSV에 기대한 컬럼이 없을 때. 원본 스키마 변경을 조용히 넘기지 않기 위한 장치."""
+    """API 응답에 기대한 필드가 없을 때. 스키마 변경을 조용히 넘기지 않기 위한 장치."""
 
 
-# 값은 파일명 접두어다. 연도별로 여러 파일이 있으면 전부 읽어 이어붙인다.
-PREFIXES = {
-    "sales": "seoul_sales",
-    "stores": "seoul_stores",
-    "footfall": "seoul_footfall",
-    "resident": "seoul_resident",
-    "worker": "seoul_worker",
-    "area": "seoul_area",
-    "change": "seoul_change",
-    "dong_sales": "seoul_dong_sales",
+SERVICES = {
+    "sales": "VwsmTrdarSelngQq",
+    "stores": "VwsmTrdarStorQq",
+    "footfall": "VwsmTrdarFlpopQq",
+    "resident": "VwsmTrdarRepopQq",
+    "worker": "VwsmTrdarWrcPopltnQq",
+    "change": "VwsmTrdarIxQq",
+    "dong_sales": "VwsmAdstrdSelngW",
+    "area": "TbgisTrdarRelm",
 }
 
-# ⚠️ Step 3의 실제 출력에서 복사할 것. 아래는 자리표시가 아니라 교체 대상이다.
+# 분기 필터(경로 끝에 STDR_YYQU_CD를 붙이는 방식)가 실제로 먹는지 여부.
+# resident/worker는 필터를 줘도 전체 행수가 그대로여서 무시되는 것으로 확인됐다.
+QUARTER_FILTER = {
+    "sales": True, "stores": True, "footfall": True, "change": True,
+    "dong_sales": True, "resident": False, "worker": False, "area": False,
+}
+
 REQUIRED_COLUMNS = {
-    "sales": ["기준_년분기_코드", "상권_코드", "서비스_업종_코드", "당월_매출_금액"],
-    "stores": ["기준_년분기_코드", "상권_코드", "서비스_업종_코드", "점포_수"],
-    "footfall": ["기준_년분기_코드", "상권_코드", "총_유동인구_수"],
-    "resident": ["기준_년분기_코드", "상권_코드", "총_상주인구_수"],
-    "worker": ["기준_년분기_코드", "상권_코드", "총_직장_인구_수"],
-    "area": ["상권_코드", "상권_코드_명", "엑스좌표_값", "와이좌표_값", "영역_면적"],
-    "change": ["기준_년분기_코드", "상권_코드", "운영_영업_개월_평균"],
-    "dong_sales": ["기준_년분기_코드", "행정동_코드", "서비스_업종_코드", "당월_매출_금액"],
+    "sales": ["STDR_YYQU_CD", "TRDAR_CD", "SVC_INDUTY_CD", "SVC_INDUTY_CD_NM",
+              "THSMON_SELNG_AMT", "MDWK_SELNG_AMT", "WKEND_SELNG_AMT",
+              "TMZON_00_06_SELNG_AMT", "TMZON_21_24_SELNG_AMT",
+              "AGRDE_10_SELNG_AMT", "AGRDE_60_ABOVE_SELNG_AMT"],
+    "stores": ["STDR_YYQU_CD", "TRDAR_CD", "SVC_INDUTY_CD", "STOR_CO",
+               "FRC_STOR_CO", "OPBIZ_RT", "CLSBIZ_RT"],
+    "footfall": ["STDR_YYQU_CD", "TRDAR_CD", "TOT_FLPOP_CO"],
+    "resident": ["STDR_YYQU_CD", "TRDAR_CD", "TOT_REPOP_CO", "TOT_HSHLD_CO"],
+    "worker": ["STDR_YYQU_CD", "TRDAR_CD", "TOT_WRC_POPLTN_CO"],
+    "change": ["STDR_YYQU_CD", "TRDAR_CD", "OPR_SALE_MT_AVRG", "TRDAR_CHNGE_IX"],
+    "dong_sales": ["STDR_YYQU_CD", "ADSTRD_CD", "SVC_INDUTY_CD", "THSMON_SELNG_AMT"],
+    "area": ["TRDAR_CD", "TRDAR_CD_NM", "XCNTS_VALUE", "YDNTS_VALUE",
+             "SIGNGU_CD", "ADSTRD_CD", "RELM_AR"],
 }
 
-_ENCODINGS = ("cp949", "utf-8-sig", "utf-8")
+
+def page_ranges(total: int, size: int = PAGE_SIZE) -> Iterator[tuple[int, int]]:
+    """1-based 폐구간 페이지. API는 끝행 - 시작행 <= 1000만 허용한다."""
+    start = 1
+    while start <= total:
+        yield start, min(start + size - 1, total)
+        start += size
 
 
-def _read_one(path) -> pd.DataFrame:
-    last_error = None
-    for enc in _ENCODINGS:
+def _key() -> str:
+    key = os.environ.get("SEOUL_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "SEOUL_API_KEY 없음. data.seoul.go.kr 에서 인증키를 발급받아 .env 에 넣는다."
+        )
+    return key
+
+
+def _call(service: str, start: int, end: int, period: str | None) -> dict:
+    url = f"{HOST}/{_key()}/json/{service}/{start}/{end}/"
+    if period:
+        url += f"{period}/"
+    for attempt in range(3):
         try:
-            return pd.read_csv(path, encoding=enc, low_memory=False)
-        except UnicodeDecodeError as exc:
-            last_error = exc
-    raise SchemaError(f"{path} 인코딩 판별 실패: {last_error}")
+            res = requests.get(url, timeout=60)
+            res.raise_for_status()
+            body = res.json()
+        except (requests.RequestException, ValueError):
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+            continue
+        if service not in body:
+            raise SchemaError(f"{service} 호출 실패: {body.get('RESULT', body)}")
+        return body[service]
+    raise SchemaError(f"{service} 재시도 소진")
+
+
+def _recent_periods(service: str) -> list[str]:
+    """최신 분기와 그 4분기 전. 최신값은 API에서 직접 확인한다."""
+    probe = _call(service, 1, 1000, None)
+    latest = max(str(r["STDR_YYQU_CD"]) for r in probe["row"])
+    year, quarter = int(latest[:4]), int(latest[4])
+    total = year * 4 + (quarter - 1) - 4
+    return [latest, f"{total // 4}{total % 4 + 1}"]
+
+
+def _fetch(dataset: str) -> pd.DataFrame:
+    service = SERVICES[dataset]
+    periods = _recent_periods(service) if QUARTER_FILTER[dataset] else [None]
+    rows: list[dict] = []
+
+    for period in periods:
+        head = _call(service, 1, 1, period)
+        total = int(head["list_total_count"])
+        for start, end in page_ranges(total):
+            rows.extend(_call(service, start, end, period)["row"])
+            time.sleep(0.1)   # 서버 예의
+
+    return pd.DataFrame(rows)
 
 
 @lru_cache(maxsize=None)
 def load(dataset: str) -> pd.DataFrame:
-    if dataset not in PREFIXES:
-        raise ValueError(f"알 수 없는 데이터셋: {dataset}. 가능: {sorted(PREFIXES)}")
+    if dataset not in SERVICES:
+        raise ValueError(f"알 수 없는 데이터셋: {dataset}. 가능: {sorted(SERVICES)}")
 
-    paths = sorted(RAW_DIR.glob(f"{PREFIXES[dataset]}*.csv"))
-    if not paths:
-        raise FileNotFoundError(
-            f"{RAW_DIR}/{PREFIXES[dataset]}*.csv 없음. "
-            "data/raw/ 에 원본을 직접 내려받아 두어야 한다 (Task 1 사전 작업)."
-        )
-
-    frames = [_read_one(p) for p in paths]
-    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-    df.columns = [c.strip() for c in df.columns]
+    cache = RAW_DIR / f"{dataset}.parquet"
+    if cache.exists():
+        df = pd.read_parquet(cache)
+    else:
+        df = _fetch(dataset)
+        RAW_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(cache, index=False)
 
     missing = [c for c in REQUIRED_COLUMNS[dataset] if c not in df.columns]
     if missing:
         raise SchemaError(
-            f"{dataset} 필수 컬럼 누락: {missing}\n"
-            f"읽은 파일: {[p.name for p in paths]}\n실제 컬럼: {list(df.columns)}"
+            f"{dataset}({SERVICES[dataset]}) 필수 필드 누락: {missing}\n"
+            f"실제 필드: {list(df.columns)}"
         )
-    return df
+
+    # resident/worker는 분기 필터가 무시되므로 여기서 최신 2개 분기만 남긴다.
+    if "STDR_YYQU_CD" in df.columns and not QUARTER_FILTER[dataset]:
+        keep = sorted(df["STDR_YYQU_CD"].astype(str).unique())[-NEEDED_PERIODS * 4:]
+        df = df[df["STDR_YYQU_CD"].astype(str).isin(keep)]
+
+    return df.reset_index(drop=True)
 ```
 
-- [ ] **Step 8: 테스트 통과 확인**
+- [ ] **Step 8: 수집 실행 및 테스트 통과 확인**
 
 ```bash
-.venv/bin/python -m pytest etl/tests/ -v
+set -a && . ./.env && set +a
+.venv/bin/python -c "
+from etl.sources import seoul_api
+for name in seoul_api.SERVICES:
+    df = seoul_api.load(name)
+    print(f'{name:12s} {len(df):>8,}행  {len(df.columns):>2}필드')
+"
+.venv/bin/python -m pytest etl/tests/test_seoul_api.py -v
 ```
-Expected: 3 passed. 실패하면 `REQUIRED_COLUMNS`를 Step 3 실측값에 맞춰 고친다 — 코드가 아니라 표를 고치는 것이 정답이다.
+Expected: 8 passed. 첫 실행은 API를 때리므로 수 분 걸리고, 이후로는 `data/raw/*.parquet` 캐시에서 즉시 읽는다. 다시 받으려면 캐시를 지운다.
+
+`INFO-200`(데이터 없음)이 뜨면 해당 분기가 아직 게시되지 않은 것이다 — `_recent_periods`가 최신값을 API에서 직접 읽으므로 자동으로 맞춰진다.
 
 - [ ] **Step 9: 커밋**
 
 ```bash
-git add etl/ data/domain/ docs/data-schema-report.md .gitignore
-git commit -m "feat(etl): 서울 원본 로더 + 스키마 검증, SHP 분기 판정 기록"
+git add etl/ docs/data-schema-report.md .gitignore
+git commit -m "feat(etl): 서울 OpenAPI 수집기 + 스키마 검증, SHP 분기 판정 기록"
 ```
 
 ---
@@ -397,7 +503,7 @@ git commit -m "feat(etl): 서울 원본 로더 + 스키마 검증, SHP 분기 �
 - Create: `etl/tests/test_seoul_adapter.py`
 
 **Interfaces:**
-- Consumes: `etl.sources.seoul_files.load()`, `etl.config.SEOUL_GU`
+- Consumes: `etl.sources.seoul_api.load()`, `etl.config.SEOUL_GU`
 - Produces:
   - `etl.adapters.schema.AreaRow` — 상권 단위 지표 (dataclass)
   - `etl.adapters.schema.IndustryRow` — 상권×업종 단위 지표 (dataclass)
@@ -485,8 +591,9 @@ AREA_COLUMNS = [
     "y",              # float 중심점 Y
     "area_size",      # float 영역면적 (m²)
     "resident_pop",   # float 상주인구
+    "household",      # float 총 가구수 — 스펙 7.1 "배후세대"
     "worker_pop",     # float 직장인구
-    "footfall",       # float 유동인구 (일평균)
+    "footfall",       # float 유동인구
 ]
 
 # 상권 × 업종 단위 지표
@@ -525,35 +632,28 @@ class Normalized:
 - [ ] **Step 4: `etl/adapters/seoul.py` 구현**
 
 ```python
-"""서울 원본 → 공통 지표 형식. 서울 스키마 지식은 이 파일 안에만 존재한다."""
+"""서울 원본 → 공통 지표 형식. 서울 스키마 지식은 이 파일 안에만 존재한다.
+
+필드명은 2026-08-08 OpenAPI 실호출로 확인한 값이다.
+"""
 import pandas as pd
 
-from etl.adapters.schema import (AGE_COLUMNS, AREA_COLUMNS, INDUSTRY_COLUMNS,
-                                 TIME_COLUMNS, Normalized)
-from etl.sources import seoul_files
+from etl.adapters.schema import (AREA_COLUMNS, INDUSTRY_COLUMNS, Normalized)
+from etl.sources import seoul_api
 
-# 원본 컬럼명 → 계약 컬럼명. Task 1 Step 3 실측값 기준으로 조정한다.
-_AREA_MAP = {
-    "상권_코드": "area_code",
-    "상권_코드_명": "area_name",
-    "엑스좌표_값": "x",
-    "와이좌표_값": "y",
-    "영역_면적": "area_size",
-}
+_PERIOD = "STDR_YYQU_CD"
+_AREA = "TRDAR_CD"
+
 _TIME_SRC = {
-    "time_00_06": "매출_금액_00_06",  "time_06_11": "매출_금액_06_11",
-    "time_11_14": "매출_금액_11_14",  "time_14_17": "매출_금액_14_17",
-    "time_17_21": "매출_금액_17_21",  "time_21_24": "매출_금액_21_24",
+    "time_00_06": "TMZON_00_06_SELNG_AMT", "time_06_11": "TMZON_06_11_SELNG_AMT",
+    "time_11_14": "TMZON_11_14_SELNG_AMT", "time_14_17": "TMZON_14_17_SELNG_AMT",
+    "time_17_21": "TMZON_17_21_SELNG_AMT", "time_21_24": "TMZON_21_24_SELNG_AMT",
 }
 _AGE_SRC = {
-    "age_10": "연령대_10_매출_금액", "age_20": "연령대_20_매출_금액",
-    "age_30": "연령대_30_매출_금액", "age_40": "연령대_40_매출_금액",
-    "age_50": "연령대_50_매출_금액", "age_60p": "연령대_60_이상_매출_금액",
+    "age_10": "AGRDE_10_SELNG_AMT", "age_20": "AGRDE_20_SELNG_AMT",
+    "age_30": "AGRDE_30_SELNG_AMT", "age_40": "AGRDE_40_SELNG_AMT",
+    "age_50": "AGRDE_50_SELNG_AMT", "age_60p": "AGRDE_60_ABOVE_SELNG_AMT",
 }
-
-
-def _latest_period(df: pd.DataFrame) -> str:
-    return str(df["기준_년분기_코드"].astype(str).max())
 
 
 def _shift_quarters(period: str, back: int) -> str:
@@ -562,100 +662,107 @@ def _shift_quarters(period: str, back: int) -> str:
     return f"{total // 4}{total % 4 + 1}"
 
 
+def _at(df: pd.DataFrame, period: str) -> pd.DataFrame:
+    return df[df[_PERIOD].astype(str) == period]
+
+
+def _num(series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
+
+
 def _to_share(df: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
-    """금액 컬럼들을 행 합 1의 비중 벡터로. 합이 0이면 균등 분배(정보 없음)."""
+    """금액 필드들을 행 합 1의 비중 벡터로. 합이 0이면 균등 분배(정보 없음)."""
     out = pd.DataFrame(index=df.index)
     for target, source in mapping.items():
-        out[target] = pd.to_numeric(df.get(source, 0), errors="coerce").fillna(0.0)
+        out[target] = _num(df.get(source, 0)).fillna(0.0)
     total = out.sum(axis=1)
-    uniform = 1.0 / len(mapping)
-    out = out.div(total.where(total > 0), axis=0).fillna(uniform)
-    return out
+    return out.div(total.where(total > 0), axis=0).fillna(1.0 / len(mapping))
 
 
 def normalize() -> Normalized:
-    sales = seoul_files.load("sales")
-    period = _latest_period(sales)
+    sales = seoul_api.load("sales")
+    period = str(sales[_PERIOD].astype(str).max())
     prev = _shift_quarters(period, 4)
 
-    cur = sales[sales["기준_년분기_코드"].astype(str) == period].copy()
-    old = sales[sales["기준_년분기_코드"].astype(str) == prev]
+    cur, old = _at(sales, period).copy(), _at(sales, prev)
+    stores = seoul_api.load("stores")
+    stores_cur, stores_old = _at(stores, period), _at(stores, prev)
 
-    stores = seoul_files.load("stores")
-    stores_cur = stores[stores["기준_년분기_코드"].astype(str) == period]
-    stores_old = stores[stores["기준_년분기_코드"].astype(str) == prev]
+    # ── 상권 단위 ──
+    area = seoul_api.load("area")
+    areas = pd.DataFrame({
+        "area_code": area[_AREA].astype(str),
+        "area_name": area["TRDAR_CD_NM"].astype(str),
+        "gu_code": area["SIGNGU_CD"].astype(str).str.zfill(5),
+        "dong_code": area["ADSTRD_CD"].astype(str).str.zfill(8),
+        "x": _num(area["XCNTS_VALUE"]),
+        "y": _num(area["YDNTS_VALUE"]),
+        "area_size": _num(area["RELM_AR"]),
+    })
 
-    # --- 상권 단위 ---
-    area = seoul_files.load("area").rename(columns=_AREA_MAP)
-    areas = area[[c for c in _AREA_MAP.values()]].copy()
-    areas["area_code"] = areas["area_code"].astype(str)
-
-    for name, dataset, col in (
-        ("resident_pop", "resident", "총_상주인구_수"),
-        ("worker_pop", "worker", "총_직장_인구_수"),
-        ("footfall", "footfall", "총_유동인구_수"),
+    for target, dataset, field in (
+        ("resident_pop", "resident", "TOT_REPOP_CO"),
+        ("household", "resident", "TOT_HSHLD_CO"),
+        ("worker_pop", "worker", "TOT_WRC_POPLTN_CO"),
+        ("footfall", "footfall", "TOT_FLPOP_CO"),
     ):
-        src = seoul_files.load(dataset)
-        src = src[src["기준_년분기_코드"].astype(str) == period]
-        agg = src.groupby(src["상권_코드"].astype(str))[col].sum().rename(name)
+        src = seoul_api.load(dataset)
+        src = _at(src, period)
+        if src.empty:   # 상주인구는 반기 갱신이라 해당 분기가 없을 수 있다
+            src = seoul_api.load(dataset)
+            src = _at(src, str(src[_PERIOD].astype(str).max()))
+        agg = src.assign(_v=_num(src[field])).groupby(
+            src[_AREA].astype(str))["_v"].sum().rename(target)
         areas = areas.merge(agg, left_on="area_code", right_index=True, how="left")
-
-    # 자치구·행정동 코드: 영역 원본에 있으면 쓰고, 없으면 행정동 매출에서 역참조
-    for target, source in (("gu_code", "자치구_코드"), ("dong_code", "행정동_코드")):
-        areas[target] = (area[source].astype(str).str.zfill(5 if target == "gu_code" else 8)
-                         if source in area.columns else pd.NA)
 
     areas = areas.reindex(columns=AREA_COLUMNS)
 
-    # --- 상권 × 업종 단위 ---
-    key = ["상권_코드", "서비스_업종_코드"]
-    ind = cur.copy()
-    ind["area_code"] = ind["상권_코드"].astype(str)
-    ind["industry_code"] = ind["서비스_업종_코드"].astype(str)
-    ind["industry_name"] = ind.get("서비스_업종_코드_명", ind["industry_code"])
-    ind["sales_total"] = pd.to_numeric(ind["당월_매출_금액"], errors="coerce").fillna(0.0)
+    # ── 상권 × 업종 단위 ──
+    ind = pd.DataFrame({
+        "area_code": cur[_AREA].astype(str),
+        "industry_code": cur["SVC_INDUTY_CD"].astype(str),
+        "industry_name": cur["SVC_INDUTY_CD_NM"].astype(str),
+        "sales_total": _num(cur["THSMON_SELNG_AMT"]).fillna(0.0),
+    }, index=cur.index)
 
-    sc = stores_cur.set_index([stores_cur["상권_코드"].astype(str),
-                               stores_cur["서비스_업종_코드"].astype(str)])["점포_수"]
-    ind["store_count"] = (
-        pd.MultiIndex.from_arrays([ind["area_code"], ind["industry_code"]])
-        .map(sc).astype("float").fillna(0).astype(int)
-    )
+    def _pair(df: pd.DataFrame) -> pd.MultiIndex:
+        return pd.MultiIndex.from_arrays(
+            [df[_AREA].astype(str), df["SVC_INDUTY_CD"].astype(str)])
+
+    keys = pd.MultiIndex.from_arrays([ind["area_code"], ind["industry_code"]])
+
+    sc = pd.Series(_num(stores_cur["STOR_CO"]).values, index=_pair(stores_cur))
+    ind["store_count"] = keys.map(sc).astype("float").fillna(0).astype(int)
     ind["sales_per_store"] = (
-        ind["sales_total"].div(ind["store_count"].where(ind["store_count"] > 0)).fillna(0.0)
-    )
+        ind["sales_total"].div(ind["store_count"].where(ind["store_count"] > 0)).fillna(0.0))
 
-    old_sales = old.groupby([old["상권_코드"].astype(str),
-                             old["서비스_업종_코드"].astype(str)])["당월_매출_금액"].sum()
-    prev_sales = pd.MultiIndex.from_arrays(
-        [ind["area_code"], ind["industry_code"]]).map(old_sales).astype("float")
+    old_sales = pd.Series(_num(old["THSMON_SELNG_AMT"]).values, index=_pair(old))
+    old_sales = old_sales.groupby(level=[0, 1]).sum()
+    prev_sales = keys.map(old_sales).astype("float")
     ind["sales_trend"] = (ind["sales_total"] / prev_sales - 1.0).where(prev_sales > 0)
 
-    old_sc = stores_old.set_index([stores_old["상권_코드"].astype(str),
-                                   stores_old["서비스_업종_코드"].astype(str)])["점포_수"]
-    prev_count = pd.MultiIndex.from_arrays(
-        [ind["area_code"], ind["industry_code"]]).map(old_sc).astype("float")
-    ind["store_delta"] = (ind["store_count"] - prev_count).fillna(0).astype(int)
+    old_sc = pd.Series(_num(stores_old["STOR_CO"]).values, index=_pair(stores_old))
+    ind["store_delta"] = (ind["store_count"] - keys.map(old_sc).astype("float")
+                          ).fillna(0).astype(int)
 
-    for target, source in (("close_rate", "폐업_률"), ("open_rate", "개업_률")):
-        src = stores_cur.set_index([stores_cur["상권_코드"].astype(str),
-                                    stores_cur["서비스_업종_코드"].astype(str)]).get(source)
-        ind[target] = (pd.MultiIndex.from_arrays([ind["area_code"], ind["industry_code"]])
-                       .map(src).astype("float") if src is not None else pd.NA)
+    for target, field in (("close_rate", "CLSBIZ_RT"), ("open_rate", "OPBIZ_RT")):
+        src = pd.Series(_num(stores_cur[field]).values, index=_pair(stores_cur))
+        # 원본이 백분율(0~100)이므로 비율(0~1)로 맞춘다
+        ind[target] = keys.map(src).astype("float") / 100.0
 
-    change = seoul_files.load("change")
-    change = change[change["기준_년분기_코드"].astype(str) == period]
-    months = change.set_index(change["상권_코드"].astype(str))["운영_영업_개월_평균"]
+    change = _at(seoul_api.load("change"), period)
+    months = pd.Series(_num(change["OPR_SALE_MT_AVRG"]).values,
+                       index=change[_AREA].astype(str))
     ind["avg_months"] = ind["area_code"].map(months).astype("float")
 
-    ind = pd.concat([ind, _to_share(ind, _TIME_SRC), _to_share(ind, _AGE_SRC)], axis=1)
+    ind = pd.concat([ind, _to_share(cur, _TIME_SRC).set_axis(ind.index),
+                     _to_share(cur, _AGE_SRC).set_axis(ind.index)], axis=1)
 
-    weekday = pd.to_numeric(ind.get("주중_매출_금액", 0), errors="coerce").fillna(0.0)
-    weekend = pd.to_numeric(ind.get("주말_매출_금액", 0), errors="coerce").fillna(0.0)
+    weekday, weekend = _num(cur["MDWK_SELNG_AMT"]).fillna(0.0), _num(cur["WKEND_SELNG_AMT"]).fillna(0.0)
     both = weekday + weekend
-    ind["weekday_ratio"] = weekday.div(both.where(both > 0)).fillna(0.5)
+    ind["weekday_ratio"] = weekday.div(both.where(both > 0)).fillna(0.5).values
 
-    industries = ind.reindex(columns=INDUSTRY_COLUMNS)
+    industries = ind.reindex(columns=INDUSTRY_COLUMNS).reset_index(drop=True)
     return Normalized(areas=areas, industries=industries, period=period, region="seoul")
 ```
 
@@ -682,7 +789,7 @@ git commit -m "feat(etl): 공통 지표 계약 스키마 + 서울 어댑터"
 - Create: `etl/tests/test_boundary.py`
 
 **Interfaces:**
-- Consumes: `etl.sources.seoul_files.load("area")`, `etl.adapters.seoul.normalize()`
+- Consumes: `etl.sources.seoul_api.load("area")`, `etl.adapters.seoul.normalize()`
 - Produces:
   - `etl.geometry.boundary.build() -> dict[str, dict]` — 자치구코드 → 브라우저에 그대로 내려갈 경계 JSON.
     반환 형태는 분기와 무관하게 아래 둘 중 하나이며, `mode` 필드로 구분한다.
@@ -746,9 +853,9 @@ def test_circle_radius_matches_area_size():
     if boundary.MODE != "circle":
         return
     import math
-    from etl.sources import seoul_files
-    sizes = seoul_files.load("area").set_index(
-        seoul_files.load("area")["상권_코드"].astype(str))["영역_면적"]
+
+    from etl.adapters import seoul
+    sizes = seoul.normalize().areas.set_index("area_code")["area_size"]
     for payload in boundary.build().values():
         for area in payload["areas"]:
             expected = math.sqrt(float(sizes[area["code"]]) / math.pi)
@@ -766,14 +873,18 @@ Expected: FAIL — `ModuleNotFoundError: etl.geometry.boundary`
 
 원본 좌표계를 추측하면 상권이 통째로 엉뚱한 곳에 찍힌다. 후보를 넣어보고 서울 안에 떨어지는 것을 고른다.
 
+서울 상권 좌표는 `XCNTS_VALUE≈201642`, `YDNTS_VALUE≈452260` 형태로 실측됐다.
+false easting 200000 / northing 500000을 쓰는 **EPSG:5181(중부원점 2000)로 추정**되나
+추정으로 두지 않고 변환 결과가 서울 안에 떨어지는지로 확정한다.
+
 ```bash
 .venv/bin/pip install pyproj==3.7.0
 .venv/bin/python - <<'PY'
 from pyproj import Transformer
-from etl.sources import seoul_files
-row = seoul_files.load("area").iloc[0]
-x, y = float(row["엑스좌표_값"]), float(row["와이좌표_값"])
-print("원본:", x, y, "/", row["상권_코드_명"])
+from etl.sources import seoul_api
+row = seoul_api.load("area").iloc[0]
+x, y = float(row["XCNTS_VALUE"]), float(row["YDNTS_VALUE"])
+print("원본:", x, y, "/", row["TRDAR_CD_NM"])
 for epsg in (5181, 5179, 5186, 5174, 4326):
     try:
         lng, lat = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326",
@@ -939,6 +1050,7 @@ def _fixture() -> Normalized:
             "area_code": code, "area_name": f"상권{code}", "gu_code": "11440",
             "dong_code": "11440510", "x": 0.0, "y": 0.0, "area_size": 10000.0,
             "resident_pop": 100 * (i + 1),
+            "household": 40 * (i + 1),
             "worker_pop": 100 * (4 - i),
             "footfall": 1000 * (i + 1),
         })
@@ -1689,10 +1801,10 @@ Expected: FAIL — `ModuleNotFoundError: etl.build`
 ```python
 """파이프라인 엔트리포인트.
 
-로컬에서 분기 1회 실행하고 산출물을 커밋한다.
-서울 열린데이터광장은 세션 기반 다운로드라 CI 자동 수집이 불가능하며,
-갱신 주기가 분기 단위라 자동화 이득이 적다 — 스펙 9.2.4.
+로컬에서도 CI(.github/workflows/quarterly-etl.yml)에서도 동일하게 돈다.
+수집이 OpenAPI 경로라 자동화가 가능하다 — 인증키만 있으면 된다.
 
+    set -a && . ./.env && set +a
     .venv/bin/python -m etl.build
 """
 import json
@@ -1816,24 +1928,24 @@ if __name__ == "__main__":
 `main()`의 자치구 루프 뒤에 삽입한다. 상권 밖 주소(🟡)를 위한 최소 데이터다.
 
 ```python
-    dong = seoul_files.load("dong_sales")
-    dong = dong[dong["기준_년분기_코드"].astype(str) == data.period]
+    dong = seoul_api.load("dong_sales")
+    dong = dong[dong["STDR_YYQU_CD"].astype(str) == data.period]
     dong_buckets: dict[str, dict] = {}
     for row in dong.itertuples():
-        dong_code = str(getattr(row, "행정동_코드"))
+        dong_code = str(row.ADSTRD_CD).zfill(8)
         gu = dong_code[:5]
         if gu not in SEOUL_GU:
             continue
         entry = dong_buckets.setdefault(gu, {"dongs": {}})["dongs"].setdefault(
             dong_code, {"industries": {}})
-        entry["industries"][str(getattr(row, "서비스_업종_코드"))] = {
-            "sales_total": _num(getattr(row, "당월_매출_금액")),
+        entry["industries"][str(row.SVC_INDUTY_CD)] = {
+            "sales_total": _num(row.THSMON_SELNG_AMT),
         }
     for gu, payload in dong_buckets.items():
         _write(WEB_DATA_DIR / "dong" / f"{gu}.json", payload)
 ```
 
-파일 상단에 `from etl.sources import seoul_files`를 추가한다.
+파일 상단에 `from etl.sources import seoul_api`를 추가한다.
 
 - [ ] **Step 5: 빌드 실행 및 테스트 통과 확인**
 
@@ -1844,42 +1956,62 @@ du -sh web/data/
 ```
 Expected: 6 passed. `web/data/` 총합이 30MB를 넘으면 GitHub Pages에서 느려진다 — 넘으면 `score` 파일에서 `axes` 하위 항목을 소수점 1자리로 줄인다.
 
-- [ ] **Step 6: 신선도 검사 워크플로 작성**
+- [ ] **Step 6: 분기 갱신 워크플로 작성**
 
-`.github/workflows/data-freshness.yml`:
+수집이 OpenAPI 경로라 **CI에서 전 과정을 자동화할 수 있다.** 분기마다 알아서 돌고
+산출물이 바뀌면 커밋한다. 도메인 자산이 아직 잠정이면 배포되지 않도록 막는다.
+
+`.github/workflows/quarterly-etl.yml`:
 ```yaml
-# 데이터를 자동 수집하지 않는다 (서울 열린데이터광장이 세션 기반 다운로드).
-# 커밋된 산출물이 낡았거나 잠정 도메인 자산으로 배포됐는지만 감시한다.
-name: data-freshness
+name: quarterly-etl
 
 on:
   schedule:
-    - cron: "0 0 1 */3 *"   # 분기 첫날
+    - cron: "0 18 5 2,5,8,11 *"   # 분기 갱신 직후(KST 새벽 3시)
   workflow_dispatch:
 
 jobs:
-  check:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: 데이터 기준 시점과 잠정 자산 여부 확인
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r etl/requirements.txt
+
+      - name: 수집 + 빌드
+        env:
+          SEOUL_API_KEY: ${{ secrets.SEOUL_API_KEY }}
+        run: python -m etl.build
+
+      - run: python -m pytest etl/tests/ -v
+
+      - name: 잠정 도메인 자산이면 배포 차단
         run: |
           python3 - <<'PY'
-          import json, sys, datetime
+          import json, sys
           meta = json.load(open("web/data/meta.json", encoding="utf-8"))
-          generated = datetime.datetime.fromisoformat(meta["generated_at"])
-          age = (datetime.datetime.now(datetime.timezone.utc) - generated).days
-          print(f"데이터 기준: {meta['period_label']} / 빌드 후 {age}일 경과")
-          problems = []
-          if age > 200:
-              problems.append(f"산출물이 {age}일 경과 — 재빌드 필요")
           if meta.get("provisional"):
-              problems.append("잠정 도메인 자산으로 배포 중 — 공개 전 실제 값 필요")
-          if problems:
-              print("::warning::" + " / ".join(problems))
+              print("::error::잠정 도메인 자산 — 공개 전 실제 값이 필요하다")
               sys.exit(1)
+          print(f"데이터 기준: {meta['period_label']}")
           PY
+
+      - name: 변경분 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/data/
+          git diff --staged --quiet || git commit -m "chore(data): 분기 갱신"
+          git push
 ```
+
+`SEOUL_API_KEY`는 저장소 Settings → Secrets and variables → Actions 에 등록한다.
+**SHP는 CI에서 받을 수 없으므로**, 분기 A(폴리곤)로 가는 경우 SHP는 저장소에 커밋해 두거나
+경계 생성만 로컬에서 돌린다. 상권 경계는 분기마다 바뀌지 않으므로 실무상 문제되지 않는다.
 
 - [ ] **Step 7: README 작성 및 커밋**
 
@@ -1894,9 +2026,12 @@ jobs:
 
 ## 데이터 갱신 (분기 1회)
 
-1. `data/raw/` 에 서울 열린데이터광장 원본 CSV를 내려받는다 (목록: `docs/data-schema-report.md`)
-2. `.venv/bin/python -m etl.build`
-3. `web/data/` 변경분을 커밋
+분기마다 GitHub Actions가 자동 실행한다. 수동으로 돌리려면:
+
+1. `.env` 에 `SEOUL_API_KEY` 설정 (data.seoul.go.kr 에서 발급)
+2. `set -a && . ./.env && set +a`
+3. `.venv/bin/python -m etl.build` — API 캐시를 새로 받으려면 `data/raw/*.parquet` 삭제
+4. `web/data/` 변경분을 커밋
 
 ## 테스트
 
@@ -3443,8 +3578,8 @@ git commit -m "feat: 도메인 자산 확정 + 검증 세트 대조 완료"
 
 | # | 항목 | 막는 태스크 |
 |---|---|---|
-| ④ | 서울 상권영역 **SHP 실물 다운로드** — 폴리곤 여부 확정 | **Task 1 (분기 판정)** ⚠️ 가장 시급 |
-| — | 서울 원본 CSV 8종 다운로드 → `data/raw/` | **Task 1** |
+| — | **서울 OpenAPI 인증키 발급** (data.seoul.go.kr 로그인 → 인증키 신청) → `.env` | **Task 1** ⚠️ 가장 시급 |
+| ④ | 서울 상권영역 **SHP 확인** — 폴리곤 여부 확정. API로는 해결 불가(중심점만 제공) | **Task 1 (분기 판정)** |
 | ⑤ | 카카오 개발자 콘솔 — 기존 앱에 도메인 추가로 쿼터 공유 가능한지 | Task 12 |
 | ⑦ | 사용 데이터셋별 공공누리 유형 확인 | 공개 배포 전 |
 | ⑧ | 도메인 자산 4종 작성 | **Task 13** (Task 1~12는 시드로 진행 가능) |
