@@ -3294,6 +3294,62 @@ git commit -m "feat(web): 대안 업종 추천 + 필터 두 겹 (창업가능 / 
 
 **이 태스크가 끝나면 서비스는 기능적으로 완결된다.** Task 12의 AI는 문장 품질만 올린다 — 스펙 10.2 "AI가 완전히 죽어도 판정은 정상 출력된다"를 구조로 강제하기 위해 순서를 이렇게 잡았다.
 
+> ### ⚠️ 2026-08-08 개정 — 아래 Step들의 코드보다 이 블록이 우선한다
+>
+> Task 8~10이 실제로 구현되면서 이 태스크가 소비할 계약이 바뀌었다. Step 5~6의
+> 예시 코드는 개정 전 것이라 **그대로 옮겨 적으면 동작하지 않는다.**
+>
+> **(가) 도메인 자산은 `data/meta.json` 하나에서만 온다.** Step 6의
+> `../data/domain/floor_coefficients.json`, `../data/domain/startup_filter.json`
+> fetch는 **삭제**한다 — 웹은 `web/`을 루트로 서비스되므로 `data/domain/`에
+> 도달할 수 없다(로컬 서버·GitHub Pages 둘 다 404). 실제 assets 구성은:
+> ```javascript
+> const assets = {
+>   groups: Object.fromEntries(meta.industries.map((i) => [i.code, i.group])),
+>   floorTable: meta.floor_config.coefficients,
+>   warnBelow: meta.floor_config.warn_below,
+>   minCoefficient: meta.floor_config.min_coefficient,
+> };
+> ```
+> `startupFilter`는 존재하지 않는다. **(나)** 참조.
+>
+> **(나) 창업 필터(필터 ①)는 폐기됐다 — 신동환 결정.** 이 기능은 "출점지에 잘
+> 맞는 업종"을 알려주는 것이지 "당신이 열 수 있는가"를 판단하지 않는다. 의원·
+> 약국·동물병원 등이 대안 추천 상위에 나오는 것은 **결함이 아니라 의도된
+> 출력**이다. 화면에 "자격 필요" 같은 태그·경고·각주를 **붙이지 않는다.** 그냥
+> 점수순으로 렌더한다.
+>
+> **(다) `recommend()`는 배열이 아니라 `{recommendations, skipped}`를 반환한다.**
+> Step 5의 `alternatives.forEach(...)`는 그대로 쓰면 터진다.
+> - `recommendations`: 최대 2건. 각 항목은
+>   `{code, name, grade, score, reason, patternsUnknown, poolSize, warning}`.
+> - `skipped`: 설정 결측·판정 실패로 후보에서 빠진 업종 `{code, name, reason}`.
+>   화면에 노출할지 `console.warn`으로만 남길지는 구현자 판단이되, **조용히
+>   버리지는 말 것**(이 프로젝트가 반복해서 잡아온 결함군이다).
+>
+> **(라) `judge()`가 돌려주는 필드가 늘었다.** `{score, grade, meaning, rank,
+> warning, patterns, patternsUnknown, poolSize, axes, storeCount, salesPerStore}`.
+> - `patterns`와 `patternsUnknown`은 **서로 다른 진술**이다: 전자는 "이 경고가
+>   붙었다", 후자는 "이 경고를 확인할 데이터가 없었다". 화면에서 후자를
+>   "경고 없음"으로 뭉개면 안 된다.
+> - `poolSize`는 등급을 매긴 표본 크기다. 얇으면(예: `< 30`) 등급이 잡음일 수
+>   있다는 사실을 화면이 드러내야 한다.
+> - `judge()`는 `entry.base === null`이거나 group/floor가 `floorTable`에 없으면
+>   **던진다.** `analyze()`는 이 예외를 잡아 🔴 "분석 불가"로 떨어뜨린다.
+>
+> **(마) `resolvePrecision()` 계약:**
+> `{level: "area"|"dong"|"none", badge: "🟢"|"🟡"|"🔴", label: "상권 단위 분석"|
+> "행정동 단위 분석"|"분석 불가"}`.
+>
+> **(바) 테스트 실행은 파일 단위로.** 이 환경의 Node(v26.4.0)에서
+> `node --test web/tests/` (디렉터리 형태)는 `ERR_MODULE_NOT_FOUND`로 깨진다.
+> `for f in web/tests/*.test.js; do node --test "$f"; done` 로 돌릴 것.
+> 현재 통과 수: locate 14 / verdict 23 / alternatives 18 = **55개**.
+>
+> **(사) pytest는 `web/data/meta.json`을 다시 쓴다**(`test_build.py`가 실제
+> 빌드를 돌린다). 커밋 전 `git status`를 보고 의도치 않은 `generated_at` 변경만
+> 있으면 `git checkout web/data/meta.json` 으로 되돌릴 것.
+
 - [ ] **Step 1: 실패하는 테스트 작성**
 
 `web/tests/narrate.test.js`:
@@ -3589,9 +3645,9 @@ document.getElementById("sources").textContent = `출처: ${meta.sources.join(" 
 
 const assets = {
   groups: Object.fromEntries(meta.industries.map((i) => [i.code, i.group])),
-  floorTable: (await loadJson("../data/domain/floor_coefficients.json")).coefficients,
-  warnBelow: (await loadJson("../data/domain/floor_coefficients.json")).warn_below,
-  startupFilter: await loadJson("../data/domain/startup_filter.json"),
+  floorTable: meta.floor_config.coefficients,
+  warnBelow: meta.floor_config.warn_below,
+  minCoefficient: meta.floor_config.min_coefficient,
 };
 
 // 업종 매핑: Task 12까지는 이름 부분일치 폴백만 쓴다 (스펙 10.2 입구 폴백).
@@ -3637,9 +3693,13 @@ async function analyze({ address, industryText, floor }) {
   const narration = templateNarration({
     ...verdict, industryName: industry.name, areaName: area.name, floor,
   });
-  const alternatives = recommend({ area, meta, assets, floor, askedCode: industry.code });
+  // ⚠️ 배열이 아니라 {recommendations, skipped}다 — 개정 블록 (다) 참조.
+  const { recommendations, skipped } = recommend({
+    area, meta, assets, floor, askedCode: industry.code });
+  if (skipped.length) console.warn("대안 후보에서 제외됨:", skipped);
 
-  return { ...base, areaName: area.name, verdict, narration, alternatives };
+  return { ...base, areaName: area.name, verdict, narration,
+           alternatives: recommendations };
 }
 
 document.getElementById("query").addEventListener("submit", async (event) => {
