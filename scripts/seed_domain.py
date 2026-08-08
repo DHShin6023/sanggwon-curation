@@ -45,6 +45,17 @@ def main() -> None:
         "coefficients": {g: {f: 1.0 for f in FLOORS} for g in GROUP_IDS},
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    (DOMAIN_DIR / "startup_filter.json").write_text(json.dumps({
+        "provisional": True,
+        "_note": ("일반 예비창업자가 실제로 열 수 있는 업종만 남기는 필터. "
+                  "이게 없으면 대안 추천에 병원·약국이 튀어나온다 — 스펙 8.2. "
+                  "작성 주체는 신동환."),
+        "excluded": [],
+        "_excluded_examples": ["의원", "치과의원", "한의원", "약국",
+                               "일반병원", "산부인과", "동물병원"],
+        "min_coefficient": 0.6,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
     print(f"시드 생성 완료: 업종 {len(codes)}개, 그룹 {len(GROUP_IDS)}개")
 
 
