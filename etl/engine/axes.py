@@ -1,0 +1,121 @@
+"""4축 원점수 산출. 스펙 7.1.
+
+전 축을 「같은 풀 안에서의 백분위(0~100, 클수록 좋음)」로 통일한다.
+단위가 다른 지표(명, 원, 개월, %)를 그대로 더할 수 없기 때문이다.
+
+풀 = (업종 × 상권종류). 업종을 나누는 이유는 스펙 7.2(마진 좋은 업종은 어딜
+찍어도 "상"이 나온다)이고, 상권종류를 나누는 이유도 같다 — 실측(2026-08-08)에서
+한 풀로 매기면 골목상권 물건지의 업종내 백분위 중앙값이 40.4점(기대 50),
+상위 25% 진입률이 17.1%(기대 25%)로 눌렸다. 예비창업자가 보는 물건은 대부분
+골목상권이라 어딜 찍어도 "중하"가 나오면 후보를 걸러주지 못한다.
+창업자가 바꿀 수 없는 구조적 조건은 비교에서 빼고 같은 조건끼리 겨루게 한다.
+
+수요축만은 3개 인구를 합치지 않고 따로 내보낸다. 업종마다 중요한 인구가
+다르므로(카페=유동, 세탁편의점=배후세대, 국밥집=직장) 합성은 업종그룹
+가중치를 아는 scoring.py의 몫이다.
+"""
+import numpy as np
+import pandas as pd
+
+from etl.adapters.schema import AGE_COLUMNS, TIME_COLUMNS, Normalized
+
+OUTPUT_COLUMNS = [
+    "area_code", "industry_code", "area_type",
+    "demand_raw_resident", "demand_raw_worker", "demand_raw_footfall",
+    "competition", "vitality", "fit",
+]
+
+
+def percentile(series: pd.Series) -> pd.Series:
+    """0~100 백분위. 결측은 결측으로 남긴다 — 없는 값을 평균으로 채우지 않는다.
+
+    pandas의 rank(pct=True)는 rank/n이라 최솟값이 0이 아니라 1/n이 된다
+    (n=4면 25,50,75,100). 최솟값 0·최댓값 100이 나오도록 (rank-1)/(n-1)로
+    직접 정규화한다.
+    """
+    numeric = pd.to_numeric(series, errors="coerce")
+    n = numeric.notna().sum()
+    if n <= 1:
+        return pd.Series(np.where(numeric.notna(), 50.0, np.nan), index=series.index)
+    ranks = numeric.rank(method="average", na_option="keep")
+    return (ranks - 1) / (n - 1) * 100.0
+
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    na = np.linalg.norm(a, axis=1)
+    nb = np.linalg.norm(b, axis=1)
+    denom = na * nb
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(denom > 0, (a * b).sum(axis=1) / denom, np.nan)
+
+
+def score(data: Normalized) -> pd.DataFrame:
+    areas = data.areas.set_index("area_code")
+    ind = data.industries.merge(
+        data.areas[["area_code", "area_type"]], on="area_code", how="left")
+
+    orphan = sorted(ind.loc[ind["area_type"].isna(), "area_code"].unique())
+    if orphan:
+        raise ValueError(
+            f"채점 풀을 정할 수 없는 상권 {len(orphan)}개: {orphan[:5]}. "
+            "임의로 분류하면 등급이 조용히 틀어진다 — 어댑터의 area_type을 확인할 것"
+        )
+
+    def by_pool(series: pd.Series) -> pd.Series:
+        """(업종 × 상권종류) 안에서만 순위를 매긴다 — 모듈 docstring 참조."""
+        return series.groupby(
+            [ind["industry_code"], ind["area_type"]], group_keys=False
+        ).apply(percentile)
+
+    # ── ① 수요: 3개 인구를 각각 백분위. 합성하지 않는다 ──
+    # 상권 단위 지표라 업종은 안 걸리지만 상권종류는 걸어야 한다
+    # (광역상권의 유동인구는 골목상권과 자릿수가 다르다).
+    demand = pd.DataFrame(index=areas.index)
+    for target, source in (("demand_raw_resident", "resident_pop"),
+                           ("demand_raw_worker", "worker_pop"),
+                           ("demand_raw_footfall", "footfall")):
+        demand[target] = areas.groupby(
+            "area_type", group_keys=False)[source].apply(percentile)
+    out = ind[["area_code", "industry_code", "area_type"]].copy()
+    out = out.join(demand, on="area_code")
+
+    # ── ② 경쟁: 점포당매출(↑) + 배후 대비 점포밀도(↓) ──
+    sales_rank = by_pool(ind["sales_per_store"])
+
+    backing = areas["resident_pop"].fillna(0) + areas["worker_pop"].fillna(0)
+    density = ind["store_count"] / ind["area_code"].map(backing).replace(0, np.nan)
+    density_rank = 100.0 - by_pool(density)
+    out["competition"] = (sales_rank * 0.6 + density_rank * 0.4)
+
+    # ── ③ 활력: 매출추세(↑) + 폐업률(↓) + 평균영업개월(↑) + 점포증감(↓) ──
+    trend_rank = by_pool(ind["sales_trend"])
+    close_rank = 100.0 - by_pool(ind["close_rate"])
+    months_rank = by_pool(ind["avg_months"])
+    delta_rank = 100.0 - by_pool(ind["store_delta"])
+    vitality = pd.concat([trend_rank * 0.35, close_rank * 0.30,
+                          months_rank * 0.20, delta_rank * 0.15], axis=1)
+    # 결측 축은 빼고 남은 가중치로 재정규화한다 — 없는 값을 0점으로 취급하지 않는다
+    weights = pd.DataFrame({c: (0.35, 0.30, 0.20, 0.15)[i]
+                            for i, c in enumerate(vitality.columns)},
+                           index=vitality.index).where(vitality.notna())
+    out["vitality"] = vitality.sum(axis=1, min_count=1) / weights.sum(axis=1)
+
+    # ── ④ 궁합: 상권 소비 프로필 vs 업종의 서울 전체 프로필 코사인 유사도 ──
+    profile_cols = TIME_COLUMNS + AGE_COLUMNS
+    weighted = ind[profile_cols].mul(ind["sales_total"], axis=0)
+
+    area_profile = weighted.groupby(ind["area_code"]).sum()
+    area_profile = area_profile.div(area_profile.sum(axis=1).replace(0, np.nan), axis=0)
+
+    ind_profile = weighted.groupby(ind["industry_code"]).sum()
+    ind_profile = ind_profile.div(ind_profile.sum(axis=1).replace(0, np.nan), axis=0)
+
+    sim = _cosine(
+        area_profile.reindex(ind["area_code"]).to_numpy(dtype=float),
+        ind_profile.reindex(ind["industry_code"]).to_numpy(dtype=float),
+    )
+    # 업종 프로필은 서울 전체 기준으로 잡되(풀을 나누면 표본이 얇아진다),
+    # 유사도를 점수로 환산할 때만 같은 풀 안에서 줄 세운다.
+    out["fit"] = by_pool(pd.Series(sim, index=ind.index))
+
+    return out.reindex(columns=OUTPUT_COLUMNS).reset_index(drop=True)
