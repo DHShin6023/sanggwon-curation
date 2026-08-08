@@ -1,0 +1,44 @@
+name: quarterly-etl
+
+on:
+  schedule:
+    - cron: "0 18 5 2,5,8,11 *"   # 분기 갱신 직후(KST 새벽 3시)
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r etl/requirements.txt
+
+      - name: 수집 + 빌드
+        env:
+          SEOUL_API_KEY: ${{ secrets.SEOUL_API_KEY }}
+        run: python -m etl.build
+
+      - run: python -m pytest etl/tests/ -v
+
+      - name: 잠정 도메인 자산이면 배포 차단
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          meta = json.load(open("web/data/meta.json", encoding="utf-8"))
+          if meta.get("provisional"):
+              print("::error::잠정 도메인 자산 — 공개 전 실제 값이 필요하다")
+              sys.exit(1)
+          print(f"데이터 기준: {meta['period_label']}")
+          PY
+
+      - name: 변경분 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/data/
+          git diff --staged --quiet || git commit -m "chore(data): 분기 갱신"
+          git push
