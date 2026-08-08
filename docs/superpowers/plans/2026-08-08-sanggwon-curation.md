@@ -506,10 +506,14 @@ git commit -m "feat(etl): 서울 OpenAPI 수집기 + 스키마 검증, SHP 분�
 **Interfaces:**
 - Consumes: `etl.sources.seoul_api.load()`, `etl.config.SEOUL_GU`
 - Produces:
-  - `etl.adapters.schema.AreaRow` — 상권 단위 지표 (dataclass)
-  - `etl.adapters.schema.IndustryRow` — 상권×업종 단위 지표 (dataclass)
-  - `etl.adapters.schema.Normalized` — 위 둘을 담는 컨테이너 (`areas: pd.DataFrame`, `industries: pd.DataFrame`, `period: str`)
+  - `etl.adapters.schema.AREA_COLUMNS: list[str]` — 상권 단위 지표의 컬럼 계약
+  - `etl.adapters.schema.INDUSTRY_COLUMNS: list[str]` — 상권×업종 단위 지표의 컬럼 계약
+  - `etl.adapters.schema.Normalized` — 위 둘을 담는 컨테이너 (`areas: pd.DataFrame`, `industries: pd.DataFrame`, `period: str`, `region: str`)
   - `etl.adapters.seoul.normalize() -> Normalized`
+
+  > **행 단위 dataclass(`AreaRow`/`IndustryRow`)는 만들지 않는다.** 초안에 남아 있던
+  > 항목이나 엔진은 DataFrame 단위로 백분위·groupby 연산을 하므로 행 객체를 쓸 곳이 없다.
+  > 계약은 컬럼 목록 상수로 표현하고 `.reindex(columns=...)`로 강제한다.
 
 **이 태스크의 산출물이 어댑터와 엔진 사이의 유일한 계약이다.** 이후 어떤 엔진 코드도 `상권_코드` 같은 서울 원본 컬럼명을 알아서는 안 된다.
 
