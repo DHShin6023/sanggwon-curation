@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>상권 큐레이션</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>상권 큐레이션</h1>
+    <p class="tagline">이 서비스는 결정해주지 않습니다. 현장에 나가기 전에 후보를 걸러줍니다.</p>
+  </header>
+
+  <form id="query">
+    <label>물건지 주소
+      <input name="address" required placeholder="예) 서울 마포구 양화로 45">
+    </label>
+    <label>오픈하려는 업종
+      <input name="industry" required placeholder="예) 카페, 국밥집, 무인세탁">
+    </label>
+    <label>층수
+      <select name="floor" required>
+        <option value="B1">지하</option>
+        <option value="F1" selected>1층</option>
+        <option value="F2">2층</option>
+        <option value="F3P">3층 이상</option>
+        <option value="DETACHED">단독건물</option>
+      </select>
+    </label>
+    <button type="submit">분석하기</button>
+  </form>
+
+  <section id="result" hidden></section>
+
+  <footer>
+    <p id="data-period"></p>
+    <p class="disclaimer">
+      이 분석은 공개 데이터 기반의 사전 스크리닝입니다.
+      임대 조건, 자리의 가시성, 건물 상태 등은 반드시 현장에서 직접 확인하십시오.
+    </p>
+    <p id="sources" class="sources"></p>
+  </footer>
+</main>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
