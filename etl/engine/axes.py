@@ -20,23 +20,30 @@ import pandas as pd
 from etl.adapters.schema import AGE_COLUMNS, TIME_COLUMNS, Normalized
 
 OUTPUT_COLUMNS = [
-    "area_code", "industry_code", "area_type",
+    "area_code", "industry_code", "area_type", "pool_size",
     "demand_raw_resident", "demand_raw_worker", "demand_raw_footfall",
     "competition", "vitality", "fit",
 ]
 
 
 def percentile(series: pd.Series) -> pd.Series:
-    """0~100 백분위. 결측은 결측으로 남긴다 — 없는 값을 평균으로 채우지 않는다.
+    """풀 안에서의 0~100 순위 점수. 결측은 결측으로 남긴다.
 
     pandas의 rank(pct=True)는 rank/n이라 최솟값이 0이 아니라 1/n이 된다
-    (n=4면 25,50,75,100). 최솟값 0·최댓값 100이 나오도록 (rank-1)/(n-1)로
-    직접 정규화한다.
+    (n=4면 25,50,75,100). 여기서는 (rank-1)/(n-1)로 직접 정규화해 풀 크기와
+    무관하게 0~100 전 구간을 채운다 — 등급컷이 업종 단위 하나뿐이라(Task 5)
+    서로 다른 크기의 풀에서 나온 점수가 같은 자로 재어져야 하기 때문이다.
+    rank/n을 쓰면 3행짜리 풀의 평균이 67점, 200행짜리 풀은 50점이 되어
+    작은 풀이 통째로 유리해진다.
+
+    표본이 1개뿐이면 순위 자체가 정의되지 않는다. 50.0을 주면 "정확히 중간"이라는
+    없는 정보를 지어내는 것이고 다운스트림에서 진짜 중앙값과 구분되지 않으므로
+    결측으로 남긴다(Global Constraint: 평균·0·임의값으로 채우지 않는다).
     """
     numeric = pd.to_numeric(series, errors="coerce")
     n = numeric.notna().sum()
     if n <= 1:
-        return pd.Series(np.where(numeric.notna(), 50.0, np.nan), index=series.index)
+        return pd.Series(np.nan, index=series.index, dtype=float)
     ranks = numeric.rank(method="average", na_option="keep")
     return (ranks - 1) / (n - 1) * 100.0
 
@@ -79,12 +86,26 @@ def score(data: Normalized) -> pd.DataFrame:
     out = ind[["area_code", "industry_code", "area_type"]].copy()
     out = out.join(demand, on="area_code")
 
+    # 풀이 얇으면 순위 점수가 잡음이다 — n=3이면 가능한 값이 0/50/100 셋뿐이다.
+    # 실측 18개 풀(92행)이 10행 미만. 어느 선부터 신뢰하지 않을지는 제품 판단이라
+    # 여기서는 자르지 않고 표본 크기를 실어 보내고, Task 5/웹이 판단한다.
+    out["pool_size"] = ind.groupby(
+        ["industry_code", "area_type"])["area_code"].transform("size")
+
     # ── ② 경쟁: 점포당매출(↑) + 배후 대비 점포밀도(↓) ──
     sales_rank = by_pool(ind["sales_per_store"])
 
-    backing = areas["resident_pop"].fillna(0) + areas["worker_pop"].fillna(0)
+    # 한쪽 인구만 결측일 때 0으로 채우면 배후가 과소집계되어 밀도가 부풀고
+    # 경쟁축이 일방적으로 깎인다. 실측: 한쪽만 결측인 상권 20곳(업종행 95개),
+    # 그중 김포공항역(3120115)은 상주인구 결측을 0으로 채운 탓에 경쟁축이
+    # 21,188행 중 최하위(0.6점)로 찍혔다. 없는 인구를 0명이라고 하지 않는다.
+    backing = areas["resident_pop"] + areas["worker_pop"]
     density = ind["store_count"] / ind["area_code"].map(backing).replace(0, np.nan)
     density_rank = 100.0 - by_pool(density)
+    # 두 구성요소 중 하나라도 없으면 경쟁축은 NaN이다 — 재정규화하지 않는다.
+    # 특히 sales_per_store 결측 253행은 "매출은 잡히는데 점포수가 0"인 원본
+    # 불일치라, 밀도만으로 채점하면 데이터 결함이 "경쟁자 없음"이라는 호재로
+    # 둔갑한다. 경쟁축은 필수 축이고, 없으면 Task 5가 등급을 보류한다.
     out["competition"] = (sales_rank * 0.6 + density_rank * 0.4)
 
     # ── ③ 활력: 매출추세(↑) + 폐업률(↓) + 평균영업개월(↑) + 점포증감(↓) ──

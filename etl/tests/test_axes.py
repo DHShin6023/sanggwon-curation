@@ -55,6 +55,45 @@ def test_percentile_preserves_missing():
     assert out.isna().sum() == 1
 
 
+def test_percentile_of_single_sample_is_missing():
+    """표본 1개로는 순위가 정의되지 않는다. 50점을 주면 '정확히 중간'이라는
+    없는 정보를 지어내는 것이고 진짜 중앙값과 구분할 수 없게 된다."""
+    assert axes.percentile(pd.Series([7.0])).isna().all()
+    assert axes.percentile(pd.Series([7.0, np.nan])).isna().all()
+
+
+def test_backing_population_missing_does_not_become_zero():
+    """인구 한쪽만 결측인 상권을 0명으로 채우면 배후가 과소집계돼 경쟁축이
+    부당하게 깎인다. 실측: 그런 상권 20곳(업종행 95개), 김포공항역은 이 탓에
+    21,188행 중 최하위(0.6점)로 찍혔었다. 채우지 말고 결측으로 전파한다."""
+    data = _fixture()
+    data.areas.loc[data.areas["area_code"] == "A", "resident_pop"] = np.nan
+    out = axes.score(data).set_index(["area_code", "industry_code"])
+    assert pd.isna(out.at[("A", "CS100001"), "competition"])
+    # 대조군: 인구가 멀쩡한 상권은 그대로 계산된다
+    assert not pd.isna(out.at[("B", "CS100001"), "competition"])
+
+
+def test_competition_is_missing_when_either_component_is():
+    """경쟁축은 필수 축이라 구성요소 하나만 없어도 NaN이다 (2026-08-08 결정).
+
+    점포수 0인 253행은 '매출은 잡히는데 점포수가 0'인 원본 불일치다. 밀도만으로
+    채점하면 데이터 결함이 '경쟁자 없음'이라는 호재로 둔갑한다. Task 5가 이 행의
+    등급을 보류한다.
+    """
+    data = _fixture()
+    data.industries.loc[data.industries["area_code"] == "A", "sales_per_store"] = np.nan
+    out = axes.score(data).set_index(["area_code", "industry_code"])
+    assert pd.isna(out.at[("A", "CS100001"), "competition"])
+
+
+def test_pool_size_is_emitted():
+    """Task 5가 얇은 풀의 등급을 보류하려면 표본 크기를 알아야 한다."""
+    out = axes.score(_split_pools())
+    # 픽스처: 골목 A·B / 광역 C·D, 업종 2개 → 모든 풀이 2행
+    assert set(out["pool_size"]) == {2}
+
+
 def test_demand_axes_are_not_merged():
     """수요축은 3개 원점수로 남아야 한다. 미리 합치면 업종별 가중이 불가능해진다."""
     out = axes.score(_fixture())
