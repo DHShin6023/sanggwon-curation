@@ -2130,7 +2130,7 @@ git commit -m "feat(engine): 패턴 감지 4종 (점수와 독립 레이어)"
 ```python
 import json
 
-from etl.config import SEOUL_GU, WEB_DATA_DIR
+from etl.config import ROOT, SEOUL_GU, WEB_DATA_DIR
 from etl import build
 
 
@@ -2193,6 +2193,51 @@ def test_unknown_patterns_are_not_reported_as_absent():
     assert found, "patterns_unknown이 전부 비었다 — 전달이 끊긴 것 아닌가"
 
 
+def test_dong_industry_codes_are_all_named():
+    """meta에 없는 업종코드가 폴백에 뜨면 화면에 코드가 그대로 노출된다.
+    실측: dong_sales에만 있는 CS200036이 이름 없이 나가고 있었다."""
+    meta = json.loads((WEB_DATA_DIR / "meta.json").read_text(encoding="utf-8"))
+    known = {i["code"] for i in meta["industries"]}
+    for path in (WEB_DATA_DIR / "dong").glob("*.json"):
+        for dong in json.loads(path.read_text(encoding="utf-8"))["dongs"].values():
+            unknown = set(dong["industries"]) - known
+            assert not unknown, f"{path.name}: meta에 없는 업종 {sorted(unknown)}"
+
+
+def test_build_does_not_leak_source_field_names():
+    """build.py가 서울 원본 필드명을 쓰면 어댑터 계약이 무의미해지고
+    경기 어댑터를 붙이는 순간 깨진다."""
+    source = (ROOT / "etl" / "build.py").read_text(encoding="utf-8")
+    for leaked in ("ADSTRD_CD", "SVC_INDUTY_CD", "STDR_YYQU_CD",
+                   "THSMON_SELNG_AMT", "TRDAR_CD"):
+        assert leaked not in source, f"원본 필드명 누출: {leaked}"
+
+
+def test_every_boundary_area_has_a_score_entry():
+    """경계 폴리곤에만 있고 score에 없는 상권이 있으면, Task 8이 주소를 그
+    폴리곤 안으로 매칭해 놓고 데이터를 못 찾는다. 실측 1,650 vs 1,564로
+    86개가 비어 있었다 — 매출 데이터 없는 상권은 빈 껍데기로라도 나가야 한다."""
+    for path in (WEB_DATA_DIR / "boundary").glob("*.json"):
+        boundary_codes = {a["code"] for a in json.loads(
+            path.read_text(encoding="utf-8"))["areas"]}
+        score_path = WEB_DATA_DIR / "score" / path.name
+        assert score_path.exists(), f"{path.name} 경계는 있는데 score가 없다"
+        score_codes = set(json.loads(
+            score_path.read_text(encoding="utf-8"))["areas"])
+        missing = boundary_codes - score_codes
+        assert not missing, f"{path.name}: score에 없는 상권 {sorted(missing)[:5]}"
+
+
+def test_json_is_parseable_by_strict_parsers():
+    """json.dumps는 Infinity를 그대로 쓰는데 브라우저 JSON.parse는 거부한다.
+    자치구 파일 하나가 통째로 안 열리고, 로컬 파이썬 테스트는 멀쩡히 통과한다."""
+    def reject(value):
+        raise AssertionError(f"JSON 표준 밖의 값: {value}")
+
+    for path in WEB_DATA_DIR.rglob("*.json"):
+        json.loads(path.read_text(encoding="utf-8"), parse_constant=reject)
+
+
 def test_no_percentage_success_field_anywhere():
     """스펙 5.2 — % 성공확률은 데이터에조차 존재해선 안 된다."""
     for path in WEB_DATA_DIR.rglob("*.json"):
@@ -2225,6 +2270,7 @@ Expected: FAIL — `ModuleNotFoundError: etl.build`
     .venv/bin/python -m etl.build
 """
 import json
+import math
 from datetime import datetime, timezone
 
 from etl.adapters import seoul
@@ -2294,7 +2340,9 @@ def main() -> None:
         })
         bucket["industries"][str(row.industry_code)] = {
             "base": _num(row.base_score),
-            "store_count": int(row.store_count or 0),
+            # `or 0`을 쓰지 않는다 — None이 "점포 0개"로 나가면 블루오션이
+            # 빈 시장으로 읽는다. 어댑터가 int로 보장하므로 그대로 받는다.
+            "store_count": int(row.store_count),
             "sales_per_store": _num(row.sales_per_store),
             "sales_trend": _num(row.sales_trend),
             "patterns": list(row.patterns or []),
@@ -2312,6 +2360,24 @@ def main() -> None:
                 "fit": _num(row.fit),
             },
         }
+
+    # 매출 데이터가 없는 상권도 빈 껍데기로 내보낸다.
+    # 경계 폴리곤은 1,650개인데 점수가 붙는 상권은 1,564개다. 86개를 빼면
+    # Task 8이 주소를 그 폴리곤 안으로 매칭해 놓고 score에서 찾지 못해
+    # 터지거나, 상권 안인데도 🟡 행정동으로 떨어진다. 빈 industries로
+    # 내보내야 웹이 🔴 "데이터 없음"이라고 정직하게 말할 수 있다.
+    for code, info in area_meta.iterrows():
+        gu = str(info["gu_code"])
+        buckets[gu]["areas"].setdefault(str(code), {
+            "name": str(info["area_name"]),
+            "area_type": str(info["area_type"]),
+            "dong_code": str(info["dong_code"]),
+            "footfall": _num(info["footfall"]),
+            "resident_pop": _num(info["resident_pop"]),
+            "household": _num(info["household"]),
+            "worker_pop": _num(info["worker_pop"]),
+            "industries": {},
+        })
 
     for gu, payload in buckets.items():
         if payload["areas"]:
@@ -2343,12 +2409,21 @@ def main() -> None:
 
 
 def _num(value):
-    """NaN을 JSON null로. 없는 값을 0으로 바꾸지 않는다."""
+    """NaN·무한대를 JSON null로. 없는 값을 0으로 바꾸지 않는다.
+
+    무한대를 걸러야 하는 이유: json.dumps는 `Infinity`를 그대로 쓰는데 이건
+    JSON 표준이 아니라 브라우저 JSON.parse가 거부한다. 자치구 파일 하나가
+    통째로 안 열린다. 지금은 0건이지만 sales_per_store = 매출/점포수라
+    상류가 한 번만 바뀌면 나올 수 있다.
+    """
+    if value is None:
+        return None
     try:
         f = float(value)
     except (TypeError, ValueError):
-        return None
-    return None if f != f else round(f, 4)
+        # 숫자로 못 바꾸는 값을 조용히 null로 흘리면 스키마 파손을 놓친다
+        raise TypeError(f"숫자가 아닌 값이 출력에 들어왔다: {value!r}")
+    return None if not math.isfinite(f) else round(f, 4)
 
 
 if __name__ == "__main__":
@@ -2359,25 +2434,55 @@ if __name__ == "__main__":
 
 `main()`의 자치구 루프 뒤에 삽입한다. 상권 밖 주소(🟡)를 위한 최소 데이터다.
 
+행정동 매출은 어댑터가 계약 형식으로 넘겨준다. `build.py`가 `seoul_api`를 직접
+읽고 `ADSTRD_CD`·`SVC_INDUTY_CD` 같은 서울 원본 필드명을 쓰면 어댑터 계약을
+우회하게 되고, 경기 어댑터를 붙이는 순간 이 자리가 깨진다(Global Constraint).
+
+`etl/adapters/schema.py`에 추가:
+
 ```python
-    dong = seoul_api.load("dong_sales")
-    dong = dong[dong["STDR_YYQU_CD"].astype(str) == data.period]
+# 행정동 단위 매출 — 상권 밖 주소(🟡 행정동 단위)용 폴백
+DONG_COLUMNS = [
+    "dong_code",       # str  행정동코드 8자리
+    "industry_code",   # str
+    "sales_total",     # float 분기 추정매출 총액
+]
+```
+
+`Normalized`에 `dongs: pd.DataFrame` 필드를 추가하고, `etl/adapters/seoul.py`의
+`normalize()`가 채운다:
+
+```python
+    dong_src = _at(seoul_api.load("dong_sales"), period)
+    dongs = pd.DataFrame({
+        "dong_code": dong_src["ADSTRD_CD"].astype(str).str.zfill(8),
+        "industry_code": dong_src["SVC_INDUTY_CD"].astype(str),
+        "sales_total": _num(dong_src["THSMON_SELNG_AMT"]),
+    }).reindex(columns=DONG_COLUMNS).reset_index(drop=True)
+```
+
+`main()`의 자치구 루프 뒤에 삽입한다:
+
+```python
+    # 등급을 매길 수 없는 업종은 폴백에서도 뺀다. 상권 단위 매출이 없어
+    # meta.json의 업종 목록·등급컷에 없는 코드가 화면에 뜨면 이름 없는
+    # 코드가 그대로 노출된다(실측 CS200036 1건).
+    known = set(names["industry_code"].astype(str))
     dong_buckets: dict[str, dict] = {}
-    for row in dong.itertuples():
-        dong_code = str(row.ADSTRD_CD).zfill(8)
-        gu = dong_code[:5]
-        if gu not in SEOUL_GU:
+    for row in data.dongs.itertuples():
+        gu = str(row.dong_code)[:5]
+        if gu not in SEOUL_GU or str(row.industry_code) not in known:
             continue
         entry = dong_buckets.setdefault(gu, {"dongs": {}})["dongs"].setdefault(
-            dong_code, {"industries": {}})
-        entry["industries"][str(row.SVC_INDUTY_CD)] = {
-            "sales_total": _num(row.THSMON_SELNG_AMT),
+            str(row.dong_code), {"industries": {}})
+        entry["industries"][str(row.industry_code)] = {
+            "sales_total": _num(row.sales_total),
         }
     for gu, payload in dong_buckets.items():
         _write(WEB_DATA_DIR / "dong" / f"{gu}.json", payload)
 ```
 
-파일 상단에 `from etl.sources import seoul_api`를 추가한다.
+`names`는 `meta.json`을 만들 때 쓰는 업종 목록이므로 그 계산을 이 블록 앞으로 옮긴다.
 
 - [ ] **Step 5: 빌드 실행 및 테스트 통과 확인**
 
@@ -2412,7 +2517,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r etl/requirements.txt
+      # 경계 폴리곤 생성에 geopandas가 필요하다. requirements.txt만 깔면
+      # etl.build가 boundary import에서 그대로 죽는다.
+      - run: pip install -r etl/requirements-geo.txt
 
       - name: 수집 + 빌드
         env:
@@ -2420,6 +2527,26 @@ jobs:
         run: python -m etl.build
 
       - run: python -m pytest etl/tests/ -v
+
+      - name: 데이터 신선도 검사
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          from datetime import date
+          meta = json.load(open("web/data/meta.json", encoding="utf-8"))
+          period = str(meta["period"])
+          today = date.today()
+          now = today.year * 4 + (today.month - 1) // 3
+          got = int(period[:4]) * 4 + int(period[4]) - 1
+          gap = now - got
+          print(f"데이터 기준: {meta['period_label']} (오늘로부터 {gap}분기 전)")
+          # 서울 게시가 늦어도 2분기 안에는 올라온다. 3분기를 넘겼다면 수집이
+          # 조용히 옛 분기에 머물러 있다는 뜻 — 화면은 멀쩡해 보이므로 여기서
+          # 터뜨리지 않으면 1년째 묵은 데이터를 서비스하게 된다.
+          if gap > 3:
+              print(f"::error::데이터가 {gap}분기 묵었다 — 수집 경로 점검 필요")
+              sys.exit(1)
+          PY
 
       - name: 잠정 도메인 자산이면 배포 차단
         run: |
@@ -2429,7 +2556,6 @@ jobs:
           if meta.get("provisional"):
               print("::error::잠정 도메인 자산 — 공개 전 실제 값이 필요하다")
               sys.exit(1)
-          print(f"데이터 기준: {meta['period_label']}")
           PY
 
       - name: 변경분 커밋
@@ -2438,12 +2564,21 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add web/data/
           git diff --staged --quiet || git commit -m "chore(data): 분기 갱신"
+          git pull --rebase --autostash
           git push
 ```
 
 `SEOUL_API_KEY`는 저장소 Settings → Secrets and variables → Actions 에 등록한다.
-**SHP는 CI에서 받을 수 없으므로**, 분기 A(폴리곤)로 가는 경우 SHP는 저장소에 커밋해 두거나
-경계 생성만 로컬에서 돌린다. 상권 경계는 분기마다 바뀌지 않으므로 실무상 문제되지 않는다.
+
+**SHP는 저장소에 커밋한다.** 세션 기반 다운로드라 CI가 받아올 수 없고, `data/raw/`가
+gitignore이므로 그대로 두면 CI에서 `boundary.build()`가 `StopIteration`으로 죽는다.
+상권 경계는 분기마다 바뀌지 않는 정적 참조 데이터(4.5MB)라 저장소에 두는 편이 맞다.
+`.gitignore`에 예외를 판다:
+
+```gitignore
+data/raw/
+!data/raw/seoul_area_shp/
+```
 
 - [ ] **Step 7: README 작성 및 커밋**
 
