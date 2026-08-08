@@ -53,7 +53,6 @@ sanggwon-curation/
 │       ├── industry_groups.json
 │       ├── axis_weights.json
 │       ├── floor_coefficients.json
-│       ├── startup_filter.json
 │       └── ksic_map.json
 ├── web/                              # GitHub Pages 루트
 │   ├── index.html
@@ -3035,9 +3034,28 @@ git commit -m "feat(web): 층수 보정 + 4단계 등급 판정 (등급반영 + 
   - `filterByFloor(codes, {groups, floor, floorTable, minCoefficient}) -> string[]` — 필터 ②
   - `recommend({area, meta, assets, floor, askedCode}) -> [{code, name, grade, score, reason}, ...]` — 최대 2건
 
-**핵심:** 별도 로직이 아니라 **같은 엔진을 한 번 더 돌리는 것**이다(스펙 8.1). `judge()`를 상권 내 전 업종에 대해 호출하고 필터 두 겹을 통과한 것 중 상위 2개를 뽑는다.
+**핵심:** 별도 로직이 아니라 **같은 엔진을 한 번 더 돌리는 것**이다(스펙 8.1). `judge()`를 상권 내 전 업종에 대해 호출하고 필터를 통과한 것 중 상위 2개를 뽑는다.
 
-- [ ] **Step 1: 창업 필터 시드 추가**
+> ### ⚠️ 2026-08-08 개정 — 이 섹션의 아래 코드는 두 곳이 낡았다
+>
+> **(가) 필터 ①(`filterOpenable`) 폐기 — 신동환 결정.** 업종 제한을 두지 않는다.
+> "그 자리에 무엇이 맞는가"를 답하는 기능이지 "묻는 사람이 그것을 열 수 있는가"를
+> 판단하지 않는다. 자격 요건은 사용자가 이미 아는 정보이고, 제외 목록을 만들면
+> 학원·부동산중개업·자동차수리까지 줄줄이 걸려 기준선이 자의적이 된다.
+> → `filterOpenable`, `startup_filter.json`, `seed_domain.py`의 시드 블록을 제거한다.
+> → 필터 ②가 쓰던 `min_coefficient`는 `floor_coefficients.json`으로 옮긴다
+>   (층수 필터의 임계값이므로 `warn_below` 옆이 제자리다).
+> → 「자격 필요」 같은 중립 태그도 붙이지 않는다. 점수순 그대로 노출한다.
+> → 실측: 필터 없이 서울 전역 21,188 조합 중 의원·치과의원·한의원이 상위 2개에
+>   오르는 경우 2,043건(9.6%). **결함이 아니라 의도된 출력이다.**
+>
+> **(나) 반환 형태가 아래 코드와 다르다** (구현 시 리뷰로 확정됨).
+> `filterByFloor`는 `string[]`이 아니라 `{passed, excluded}`를,
+> `recommend`는 배열이 아니라 `{recommendations, skipped}`를 반환한다.
+> 설정 누락(업종→그룹 매핑 공백)을 조용히 통과시키거나 조용히 버리지 않고
+> 보이게 하기 위해서다. Task 11은 이 형태를 소비해야 한다.
+
+- [ ] ~~**Step 1: 창업 필터 시드 추가**~~ — **폐기됨(위 개정 참조)**
 
 `scripts/seed_domain.py`의 `main()` 끝에 추가:
 ```python
@@ -4008,11 +4026,15 @@ git commit -m "feat(worker): 카카오·OpenRouter 프록시 + AI 입구/출구 
 - Modify: `data/domain/industry_groups.json`
 - Modify: `data/domain/axis_weights.json`
 - Modify: `data/domain/floor_coefficients.json`
-- Modify: `data/domain/startup_filter.json`
 
 **Interfaces:**
 - Consumes: 전체 파이프라인
-- Produces: `provisional: false` 인 도메인 자산 4종 + 검증 결과 기록
+- Produces: `provisional: false` 인 도메인 자산 **3종** + 검증 결과 기록
+
+> **2026-08-08 변경 — 창업 필터(필터 ①) 폐기.** 신동환 결정으로 업종 제한을 두지
+> 않는다. 이 기능은 "그 자리에 무엇이 맞는가"를 답하는 것이지 "묻는 사람이 그것을
+> 열 수 있는가"를 판단하지 않는다. `startup_filter.json`은 제거되고 도메인 자산은
+> 4종 → 3종이 된다. 스펙 8.2 개정 참조.
 
 **이것이 최종 품질 게이트다**(스펙 12). 여기까지는 코드가 도는지를 봤고, 여기서는 **판정이 쓸모 있는지**를 본다. 이 태스크의 작업 주체는 신동환이며 코드는 대조를 돕는 역할만 한다.
 
@@ -4042,9 +4064,10 @@ PY
 
 `floor_coefficients.json`에서 그룹 × 5구간 계수를 채운다. `1.0`이 기준, `0.4`면 그 자리에서 그 업종은 반토막이라는 뜻이다. `warn_below`(기본 0.75) 미만이면 경고가 뜬다. `"basis": "heuristic"` 은 그대로 둔다 — 근거의 성격을 지우지 않는다.
 
-- [ ] **Step 4: 창업 필터 확정 (신동환)**
+- [ ] ~~**Step 4: 창업 필터 확정**~~ — **폐기됨. 할 일 없음.**
 
-`startup_filter.json`의 `excluded` 배열에 자격증·고액자본 업종 코드를 채운다.
+업종 제한을 두지 않기로 했다(스펙 8.2). 의원·치과의원·한의원이 대안 상위에 오르는
+것은 결함이 아니라 의도된 출력이다 — 실측 서울 전역 21,188 조합 중 2,043건(9.6%).
 
 - [ ] **Step 5: 자산 정합성 테스트 작성**
 
@@ -4095,7 +4118,7 @@ def test_groups_are_differentiated():
 
 def test_nothing_provisional_remains():
     for name in ("industry_groups.json", "axis_weights.json",
-                 "floor_coefficients.json", "startup_filter.json"):
+                 "floor_coefficients.json"):
         assert _read(name).get("provisional") is False, f"{name} 아직 잠정값"
 ```
 
