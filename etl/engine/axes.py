@@ -23,6 +23,11 @@ OUTPUT_COLUMNS = [
     "area_code", "industry_code", "area_type", "pool_size",
     "demand_raw_resident", "demand_raw_worker", "demand_raw_footfall",
     "competition", "vitality", "fit",
+    # 경쟁축의 두 재료를 따로도 내보낸다. 스펙 7.3의 패턴 정의가 합성치가 아니라
+    # 원 지표를 지목하기 때문이다 — 함정상권은 "점포당매출 하위", 포화는
+    # "점포밀도 상위 5%"다. 합성치로 근사하면 전혀 다른 상권이 잡힌다(Task 6).
+    "sales_per_store_pct",   # 풀내 백분위. 높을수록 점포당매출이 많다
+    "density_pct",           # 풀내 백분위. 높을수록 점포가 빽빽하다
 ]
 
 
@@ -95,7 +100,7 @@ def score(data: Normalized) -> pd.DataFrame:
         ["industry_code", "area_type"])["area_code"].transform("size")
 
     # ── ② 경쟁: 점포당매출(↑) + 배후 대비 점포밀도(↓) ──
-    sales_rank = by_pool(ind["sales_per_store"])
+    out["sales_per_store_pct"] = by_pool(ind["sales_per_store"])
 
     # 한쪽 인구만 결측일 때 0으로 채우면 배후가 과소집계되어 밀도가 부풀고
     # 경쟁축이 일방적으로 깎인다. 실측: 한쪽만 결측인 상권 20곳(업종행 95개),
@@ -103,12 +108,13 @@ def score(data: Normalized) -> pd.DataFrame:
     # 21,188행 중 최하위(0.6점)로 찍혔다. 없는 인구를 0명이라고 하지 않는다.
     backing = areas["resident_pop"] + areas["worker_pop"]
     density = ind["store_count"] / ind["area_code"].map(backing).replace(0, np.nan)
-    density_rank = 100.0 - by_pool(density)
+    out["density_pct"] = by_pool(density)
+    density_rank = 100.0 - out["density_pct"]   # 빽빽할수록 경쟁축에는 감점
     # 두 구성요소 중 하나라도 없으면 경쟁축은 NaN이다 — 재정규화하지 않는다.
     # 특히 sales_per_store 결측 253행은 "매출은 잡히는데 점포수가 0"인 원본
     # 불일치라, 밀도만으로 채점하면 데이터 결함이 "경쟁자 없음"이라는 호재로
     # 둔갑한다. 경쟁축은 필수 축이고, 없으면 Task 5가 등급을 보류한다.
-    out["competition"] = (sales_rank * 0.6 + density_rank * 0.4)
+    out["competition"] = (out["sales_per_store_pct"] * 0.6 + density_rank * 0.4)
 
     # ── ③ 활력: 매출추세(↑) + 폐업률(↓) + 평균영업개월(↑) + 점포증감(↓) ──
     trend_rank = by_pool(ind["sales_trend"])
