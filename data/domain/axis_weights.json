@@ -1,0 +1,54 @@
+{
+  "provisional": true,
+  "_note": "전 그룹 동일 가중 잠정값. 그룹별 차등이 이 서비스의 핵심 자산이다.",
+  "weights": {
+    "유동의존형": {
+      "resident": 0.15,
+      "worker": 0.1,
+      "footfall": 0.15,
+      "competition": 0.25,
+      "vitality": 0.2,
+      "fit": 0.15
+    },
+    "배후의존형": {
+      "resident": 0.15,
+      "worker": 0.1,
+      "footfall": 0.15,
+      "competition": 0.25,
+      "vitality": 0.2,
+      "fit": 0.15
+    },
+    "직장의존형": {
+      "resident": 0.15,
+      "worker": 0.1,
+      "footfall": 0.15,
+      "competition": 0.25,
+      "vitality": 0.2,
+      "fit": 0.15
+    },
+    "목적방문형": {
+      "resident": 0.15,
+      "worker": 0.1,
+      "footfall": 0.15,
+      "competition": 0.25,
+      "vitality": 0.2,
+      "fit": 0.15
+    },
+    "생활서비스형": {
+      "resident": 0.15,
+      "worker": 0.1,
+      "footfall": 0.15,
+      "competition": 0.25,
+      "vitality": 0.2,
+      "fit": 0.15
+    },
+    "야간업종형": {
+      "resident": 0.15,
+      "worker": 0.1,
+      "footfall": 0.15,
+      "competition": 0.25,
+      "vitality": 0.2,
+      "fit": 0.15
+    }
+  }
+}
