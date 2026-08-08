@@ -1030,13 +1030,22 @@ git commit -m "feat(etl): 상권 경계 폴리곤 생성 + 자치구 분할"
 - Create: `etl/tests/test_axes.py`
 
 **Interfaces:**
-- Consumes: `etl.adapters.schema.Normalized`, `AGE_COLUMNS`, `TIME_COLUMNS`
+- Consumes: `etl.adapters.schema.Normalized`, `AGE_COLUMNS`, `TIME_COLUMNS`, `AREA_TYPES`
 - Produces:
   - `etl.engine.axes.score(data: Normalized) -> pd.DataFrame` — 컬럼:
-    `area_code, industry_code, demand_raw_resident, demand_raw_worker, demand_raw_footfall, competition, vitality, fit`
+    `area_code, industry_code, area_type, demand_raw_resident, demand_raw_worker, demand_raw_footfall, competition, vitality, fit`
     - `demand_raw_*` 3개는 **각각 0~100 백분위**이며 합성하지 않는다. 업종그룹 가중치가 Task 5에서 이 셋을 섞는다 (스펙 7.1 "업종마다 중요한 인구가 다르다").
     - `competition`, `vitality`, `fit`은 0~100 백분위. 클수록 좋다.
+    - `area_type`은 Task 5가 등급컷을 같은 풀 기준으로 끊을 수 있도록 함께 내보낸다.
   - `etl.engine.axes.percentile(series: pd.Series) -> pd.Series` — 0~100, 결측은 결측 유지
+
+**채점 풀 (2026-08-08 결정, 실측 근거):**
+모든 백분위는 **(업종 × 상권종류)** 안에서만 매긴다. 한 풀로 매기면 골목상권
+물건지의 업종내 백분위 중앙값이 40.4점(기대 50), 상위 25% 진입률이 17.1%
+(기대 25%)로 눌린다 — 타겟인 예비창업자가 보는 물건은 대부분 골목상권이라
+어딜 찍어도 "중하"가 나와 후보를 걸러주지 못한다. 업종별 백분위를 쓰는 이유
+(스펙 7.2)와 같은 논리다. 상권종류는 어댑터가 주는 `area_type`
+(alley/market/metro) 3분할.
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -1055,7 +1064,8 @@ def _fixture() -> Normalized:
     area_rows = []
     for i, code in enumerate(["A", "B", "C", "D"]):
         area_rows.append({
-            "area_code": code, "area_name": f"상권{code}", "gu_code": "11440",
+            "area_code": code, "area_name": f"상권{code}", "area_type": "alley",
+            "gu_code": "11440",
             "dong_code": "11440510", "x": 0.0, "y": 0.0, "area_size": 10000.0,
             "resident_pop": 100 * (i + 1),
             "household": 40 * (i + 1),
@@ -1147,6 +1157,45 @@ def test_fit_is_percentile_of_profile_similarity():
 def test_row_count_preserved():
     data = _fixture()
     assert len(axes.score(data)) == len(data.industries)
+
+
+def _split_pools() -> Normalized:
+    """C·D만 광역상권으로 돌린 픽스처. A·B는 골목으로 남는다."""
+    data = _fixture()
+    data.areas.loc[data.areas["area_code"].isin(["C", "D"]), "area_type"] = "metro"
+    return data
+
+
+def test_area_type_is_emitted():
+    """Task 5가 등급컷을 같은 풀로 끊으려면 풀 키가 따라 나와야 한다."""
+    out = axes.score(_split_pools())
+    assert set(out["area_type"]) == {"alley", "metro"}
+
+
+def test_other_pools_do_not_move_alley_scores():
+    """다른 풀의 값이 아무리 흔들려도 골목상권 점수는 그대로여야 한다.
+
+    한 풀로 매기면 골목 물건지가 광역상권에 눌린다(실측 백분위 중앙값 40.4점).
+    광역 쪽 점포당매출만 100배로 키운 뒤 골목 점수가 미동도 없는지로 검증한다.
+    """
+    before = axes.score(_split_pools()).set_index(["area_code", "industry_code"])
+
+    shifted = _split_pools()
+    metro = shifted.industries["area_code"].isin(["C", "D"])
+    shifted.industries.loc[metro, "sales_per_store"] *= 100.0
+    after = axes.score(shifted).set_index(["area_code", "industry_code"])
+
+    for area in ("A", "B"):
+        key = (area, "CS100001")
+        assert before.at[key, "competition"] == pytest.approx(after.at[key, "competition"])
+
+
+def test_area_without_type_raises(): 
+    """풀을 못 정하는 상권을 조용히 통과시키면 그 상권만 점수가 NaN이 된다."""
+    data = _fixture()
+    data.areas.loc[data.areas["area_code"] == "A", "area_type"] = None
+    with pytest.raises(ValueError, match="A"):
+        axes.score(data)
 ```
 
 - [ ] **Step 2: 테스트 실패 확인**
@@ -1161,8 +1210,15 @@ Expected: FAIL — `ModuleNotFoundError: etl.engine.axes`
 ```python
 """4축 원점수 산출. 스펙 7.1.
 
-전 축을 「전체 상권 대비 백분위(0~100, 클수록 좋음)」로 통일한다.
+전 축을 「같은 풀 안에서의 백분위(0~100, 클수록 좋음)」로 통일한다.
 단위가 다른 지표(명, 원, 개월, %)를 그대로 더할 수 없기 때문이다.
+
+풀 = (업종 × 상권종류). 업종을 나누는 이유는 스펙 7.2(마진 좋은 업종은 어딜
+찍어도 "상"이 나온다)이고, 상권종류를 나누는 이유도 같다 — 실측(2026-08-08)에서
+한 풀로 매기면 골목상권 물건지의 업종내 백분위 중앙값이 40.4점(기대 50),
+상위 25% 진입률이 17.1%(기대 25%)로 눌렸다. 예비창업자가 보는 물건은 대부분
+골목상권이라 어딜 찍어도 "중하"가 나오면 후보를 걸러주지 못한다.
+창업자가 바꿀 수 없는 구조적 조건은 비교에서 빼고 같은 조건끼리 겨루게 한다.
 
 수요축만은 3개 인구를 합치지 않고 따로 내보낸다. 업종마다 중요한 인구가
 다르므로(카페=유동, 세탁편의점=배후세대, 국밥집=직장) 합성은 업종그룹
@@ -1174,7 +1230,7 @@ import pandas as pd
 from etl.adapters.schema import AGE_COLUMNS, TIME_COLUMNS, Normalized
 
 OUTPUT_COLUMNS = [
-    "area_code", "industry_code",
+    "area_code", "industry_code", "area_type",
     "demand_raw_resident", "demand_raw_worker", "demand_raw_footfall",
     "competition", "vitality", "fit",
 ]
@@ -1197,33 +1253,48 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 def score(data: Normalized) -> pd.DataFrame:
-    ind = data.industries.copy()
     areas = data.areas.set_index("area_code")
+    ind = data.industries.merge(
+        data.areas[["area_code", "area_type"]], on="area_code", how="left")
+
+    orphan = sorted(ind.loc[ind["area_type"].isna(), "area_code"].unique())
+    if orphan:
+        raise ValueError(
+            f"채점 풀을 정할 수 없는 상권 {len(orphan)}개: {orphan[:5]}. "
+            "임의로 분류하면 등급이 조용히 틀어진다 — 어댑터의 area_type을 확인할 것"
+        )
+
+    def by_pool(series: pd.Series) -> pd.Series:
+        """(업종 × 상권종류) 안에서만 순위를 매긴다 — 모듈 docstring 참조."""
+        return series.groupby(
+            [ind["industry_code"], ind["area_type"]], group_keys=False
+        ).apply(percentile)
 
     # ── ① 수요: 3개 인구를 각각 백분위. 합성하지 않는다 ──
+    # 상권 단위 지표라 업종은 안 걸리지만 상권종류는 걸어야 한다
+    # (광역상권의 유동인구는 골목상권과 자릿수가 다르다).
     demand = pd.DataFrame(index=areas.index)
     for target, source in (("demand_raw_resident", "resident_pop"),
                            ("demand_raw_worker", "worker_pop"),
                            ("demand_raw_footfall", "footfall")):
-        demand[target] = percentile(areas[source])
-    out = ind[["area_code", "industry_code"]].copy()
+        demand[target] = areas.groupby(
+            "area_type", group_keys=False)[source].apply(percentile)
+    out = ind[["area_code", "industry_code", "area_type"]].copy()
     out = out.join(demand, on="area_code")
 
     # ── ② 경쟁: 점포당매출(↑) + 배후 대비 점포밀도(↓) ──
-    by_industry = ind.groupby("industry_code", group_keys=False)
-    sales_rank = by_industry["sales_per_store"].apply(percentile)
+    sales_rank = by_pool(ind["sales_per_store"])
 
     backing = areas["resident_pop"].fillna(0) + areas["worker_pop"].fillna(0)
     density = ind["store_count"] / ind["area_code"].map(backing).replace(0, np.nan)
-    density_rank = 100.0 - ind.assign(_d=density).groupby(
-        "industry_code", group_keys=False)["_d"].apply(percentile)
+    density_rank = 100.0 - by_pool(density)
     out["competition"] = (sales_rank * 0.6 + density_rank * 0.4)
 
     # ── ③ 활력: 매출추세(↑) + 폐업률(↓) + 평균영업개월(↑) + 점포증감(↓) ──
-    trend_rank = by_industry["sales_trend"].apply(percentile)
-    close_rank = 100.0 - by_industry["close_rate"].apply(percentile)
-    months_rank = percentile(ind["avg_months"])
-    delta_rank = 100.0 - by_industry["store_delta"].apply(percentile)
+    trend_rank = by_pool(ind["sales_trend"])
+    close_rank = 100.0 - by_pool(ind["close_rate"])
+    months_rank = by_pool(ind["avg_months"])
+    delta_rank = 100.0 - by_pool(ind["store_delta"])
     vitality = pd.concat([trend_rank * 0.35, close_rank * 0.30,
                           months_rank * 0.20, delta_rank * 0.15], axis=1)
     # 결측 축은 빼고 남은 가중치로 재정규화한다 — 없는 값을 0점으로 취급하지 않는다
@@ -1246,8 +1317,9 @@ def score(data: Normalized) -> pd.DataFrame:
         area_profile.reindex(ind["area_code"]).to_numpy(dtype=float),
         ind_profile.reindex(ind["industry_code"]).to_numpy(dtype=float),
     )
-    out["fit"] = ind.assign(_s=sim).groupby(
-        "industry_code", group_keys=False)["_s"].apply(percentile)
+    # 업종 프로필은 서울 전체 기준으로 잡되(풀을 나누면 표본이 얇아진다),
+    # 유사도를 점수로 환산할 때만 같은 풀 안에서 줄 세운다.
+    out["fit"] = by_pool(pd.Series(sim, index=ind.index))
 
     return out.reindex(columns=OUTPUT_COLUMNS).reset_index(drop=True)
 ```
@@ -1257,13 +1329,19 @@ def score(data: Normalized) -> pd.DataFrame:
 ```bash
 .venv/bin/python -m pytest etl/tests/test_axes.py -v
 ```
-Expected: 8 passed
+Expected: 11 passed
+
+전체 스위트도 함께 돌려 어댑터 계약 변경이 다른 데를 깨지 않았는지 본다:
+
+```bash
+.venv/bin/python -m pytest etl/tests -q
+```
 
 - [ ] **Step 5: 커밋**
 
 ```bash
 git add etl/engine/axes.py etl/tests/test_axes.py
-git commit -m "feat(engine): 4축 원점수 산출 (수요축은 3개 인구 분리 유지)"
+git commit -m "feat(engine): 4축 원점수 산출 (업종×상권종류 풀 백분위)"
 ```
 
 ---
@@ -1367,6 +1445,7 @@ def _axis_df() -> pd.DataFrame:
     return pd.DataFrame({
         "area_code": ["A", "B", "C", "D"] * 2,
         "industry_code": ["CS1"] * 4 + ["CS2"] * 4,
+        "area_type": ["alley", "alley", "metro", "metro"] * 2,
         "demand_raw_resident": [10, 40, 70, 100] * 2,
         "demand_raw_worker": [100, 70, 40, 10] * 2,
         "demand_raw_footfall": [10, 40, 70, 100] * 2,
@@ -1422,6 +1501,30 @@ def test_base_score_uses_group_specific_demand():
 def test_base_score_bounded():
     out = scoring.base_score(_axis_df(), _assets())
     assert out["base_score"].between(0, 100).all()
+
+
+def test_grades_are_even_across_pools():
+    """골목상권 물건지가 등급에서 눌리면 안 된다 — 서비스가 후보를 못 걸러낸다.
+
+    업종 단위 컷 하나로 모든 상권종류를 끊는 설계의 전제(4축이 이미 풀 내부
+    백분위이므로 풀마다 0~100을 고르게 채운다)를 실데이터로 확인한다.
+    한 풀로 매기던 시절 골목상권의 백분위 중앙값은 40.4점이었다.
+    """
+    from etl.adapters import seoul
+    from etl.engine import axes
+
+    # 실제 업종코드를 전부 덮는 자산이 필요하므로 seed_domain.py가 만든 것을 쓴다
+    scored = scoring.base_score(axes.score(seoul.normalize()), scoring.load_domain())
+    cuts = scoring.grade_cuts(scored)
+    scored = scored.dropna(subset=["base_score"])
+    scored["grade"] = [
+        scoring.grade_of(s, cuts[c]) if c in cuts else None
+        for s, c in zip(scored["base_score"], scored["industry_code"])
+    ]
+    share = scored.groupby("area_type")["grade"].value_counts(normalize=True).unstack()
+    for pool in share.index:
+        top = share.loc[pool, "상"]
+        assert 0.15 <= top <= 0.35, f"{pool} 풀의 '상' 비율 {top:.1%} — 25% 근처여야 한다"
 
 
 def test_grade_cuts_are_per_industry():
@@ -1523,7 +1626,14 @@ def base_score(axis_df: pd.DataFrame, assets: DomainAssets) -> pd.DataFrame:
 
 
 def grade_cuts(scored: pd.DataFrame) -> dict[str, list[float]]:
-    """업종별 75/50/25 분위. 스펙 7.2 — 등급은 반드시 동일 업종 안에서 매긴다."""
+    """업종별 75/50/25 분위. 스펙 7.2 — 등급은 반드시 동일 업종 안에서 매긴다.
+
+    상권종류(area_type)로는 더 쪼개지 않는다. base_score를 이루는 4축이 이미
+    (업종 × 상권종류) 안의 백분위라 각 풀의 점수가 저마다 0~100을 채우고,
+    따라서 업종 단위 컷 하나로도 풀 간 공평하다. 여기서 또 쪼개면 (업종 ×
+    상권종류) 그룹 중 18개가 10행 미만이라 분위수가 잡음이 된다.
+    이 가정은 test_grades_are_even_across_pools가 지킨다.
+    """
     cuts: dict[str, list[float]] = {}
     for code, group in scored.groupby("industry_code"):
         s = group["base_score"].dropna()
