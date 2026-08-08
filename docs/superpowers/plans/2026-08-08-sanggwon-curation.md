@@ -801,8 +801,13 @@ git commit -m "feat(etl): 공통 지표 계약 스키마 + 서울 어댑터"
     ```jsonc
     {"mode": "polygon", "areas": [{"code": "3110001", "name": "...",
       "bbox": [minLng, minLat, maxLng, maxLat],
-      "rings": [[[lng, lat], ...]]}]}
+      // GeoJSON MultiPolygon 좌표 구조: parts[i][0]=외곽링, parts[i][1:]=구멍
+      "rings": [[ [[lng,lat],...],  [[lng,lat],...] ], [ [[lng,lat],...] ]]}]}
     ```
+
+  > **구멍(interior ring)을 반드시 담는다.** 실측상 1,650개 중 40개 상권에 구멍
+  > 41개가 있고 큰 것은 폴리곤 면적의 19%에 달한다. 외곽링만 내보내면 그 구멍
+  > 안의 주소가 상권 내부로 오판정되어 🟢 상권 단위 분석을 거짓으로 표기한다.
   - `etl.geometry.boundary.MODE: str` — `"polygon"`
 
 **★ 이 태스크가 Task 1의 분기를 흡수했고, 결과는 폴리곤이다.** 출력 JSON은 `"mode": "polygon"` 하나만 존재한다.
@@ -837,7 +842,7 @@ def test_coordinates_are_wgs84_inside_seoul():
     result = boundary.build()
     for payload in result.values():
         for area in payload["areas"]:
-            lng, lat = area["rings"][0][0]
+            lng, lat = area["rings"][0][0][0]
             assert 126.7 < lng < 127.3, f"{area['code']} 경도 이상: {lng}"
             assert 37.4 < lat < 37.7, f"{area['code']} 위도 이상: {lat}"
 
@@ -855,11 +860,16 @@ def test_all_areas_covered():
     assert total == 1650, f"{total}개만 담김 — 누락 {1650 - total}개"
 
 
+def _all_rings(area):
+    """rings는 GeoJSON MultiPolygon 좌표 구조다: parts[i][0]=외곽, parts[i][1:]=구멍."""
+    return [ring for part in area["rings"] for ring in part]
+
+
 def test_rings_are_closed():
     """point-in-polygon은 닫힌 링을 전제한다."""
     for payload in boundary.build().values():
         for area in payload["areas"]:
-            for ring in area["rings"]:
+            for ring in _all_rings(area):
                 assert len(ring) >= 4
                 assert ring[0] == ring[-1], f"{area['code']} 링이 닫히지 않음"
 
@@ -869,9 +879,23 @@ def test_bbox_contains_rings():
     for payload in boundary.build().values():
         for area in payload["areas"]:
             min_lng, min_lat, max_lng, max_lat = area["bbox"]
-            for ring in area["rings"]:
+            for ring in _all_rings(area):
                 for lng, lat in ring:
                     assert min_lng <= lng <= max_lng and min_lat <= lat <= max_lat
+
+
+def test_holes_are_preserved():
+    """구멍을 버리면 그 안의 주소가 상권 내부로 오판정된다.
+    실측: 1,650개 중 40개 상권에 구멍 41개, 최대 폴리곤 면적의 19%."""
+    with_holes = [a for p in boundary.build().values() for a in p["areas"]
+                  if any(len(part) > 1 for part in a["rings"])]
+    assert len(with_holes) == 40, f"구멍 있는 상권 {len(with_holes)}개 — 40개여야 한다"
+
+
+def test_no_area_silently_dropped():
+    """코드 불일치로 상권이 조용히 사라지면 안 된다 (스펙: 누락을 드러낸다)."""
+    total = sum(len(p["areas"]) for p in boundary.build().values())
+    assert total == 1650
 ```
 
 - [ ] **Step 2: 테스트 실패 확인**
@@ -953,17 +977,26 @@ def build() -> dict[str, dict]:
 
     meta = seoul.normalize().areas.set_index("area_code")
     buckets: dict[str, dict] = {}
+    dropped: list[tuple[str, str]] = []   # 조용히 버리지 않는다 — 스펙: 누락을 드러낸다
 
     for _, row in gdf.iterrows():
         code = row["area_code"]
         if code not in meta.index:
+            dropped.append((code, "어댑터에 없는 상권코드"))
             continue
         gu = str(meta.at[code, "gu_code"])
         if gu not in SEOUL_GU:
+            dropped.append((code, f"SEOUL_GU 밖 자치구코드 {gu}"))
             continue
         geom = row.geometry
         polys = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
-        rings = [[[round(x, 6), round(y, 6)] for x, y in p.exterior.coords] for p in polys]
+        # GeoJSON MultiPolygon 좌표 구조. part[0]=외곽링, part[1:]=구멍.
+        # 구멍을 버리면 그 안의 주소가 상권 내부로 오판정된다 — 스펙 10.3 위반.
+        rings = [
+            [[[round(x, 6), round(y, 6)] for x, y in ring.coords]
+             for ring in (p.exterior, *p.interiors)]
+            for p in polys
+        ]
         minx, miny, maxx, maxy = geom.bounds
         buckets.setdefault(gu, {"mode": MODE, "areas": []})["areas"].append({
             "code": code,
@@ -2070,10 +2103,20 @@ test("distanceMeters: 서울시청↔광화문은 대략 1km 미만", () => {
 
 test("matchArea: polygon 모드", () => {
   const boundary = { mode: "polygon", areas: [
-    { code: "A1", name: "테스트상권", bbox: [126.9, 37.5, 127.0, 37.6], rings: [SQUARE] },
+    { code: "A1", name: "테스트상권", bbox: [126.9, 37.5, 127.0, 37.6], rings: [[SQUARE]] },
   ]};
   assert.equal(matchArea({ lng: 126.95, lat: 37.55 }, boundary).code, "A1");
   assert.equal(matchArea({ lng: 128.0, lat: 37.55 }, boundary), null);
+});
+
+test("matchArea: 구멍 안의 점은 상권 밖이다", () => {
+  const outer = [[126.90, 37.50], [127.10, 37.50], [127.10, 37.70], [126.90, 37.70], [126.90, 37.50]];
+  const hole  = [[126.95, 37.55], [127.05, 37.55], [127.05, 37.65], [126.95, 37.65], [126.95, 37.55]];
+  const boundary = { mode: "polygon", areas: [
+    { code: "H1", name: "구멍상권", bbox: [126.90, 37.50, 127.10, 37.70], rings: [[outer, hole]] },
+  ]};
+  assert.equal(matchArea({ lng: 126.92, lat: 37.52 }, boundary).code, "H1");  // 외곽 안, 구멍 밖
+  assert.equal(matchArea({ lng: 127.00, lat: 37.60 }, boundary), null);        // 구멍 안
 });
 
 test("matchArea: polygon 외 모드는 조용히 넘기지 않고 던진다", () => {
@@ -2085,8 +2128,8 @@ test("matchArea: 겹칠 때 더 가까운 중심을 고른다", () => {
   const near = [[126.90, 37.50], [127.10, 37.50], [127.10, 37.70], [126.90, 37.70], [126.90, 37.50]];
   const far  = [[126.70, 37.40], [127.30, 37.40], [127.30, 37.75], [126.70, 37.75], [126.70, 37.40]];
   const boundary = { mode: "polygon", areas: [
-    { code: "FAR",   name: "넓은상권", bbox: [126.70, 37.40, 127.30, 37.75], rings: [far] },
-    { code: "CLOSE", name: "좁은상권", bbox: [126.90, 37.50, 127.10, 37.70], rings: [near] },
+    { code: "FAR",   name: "넓은상권", bbox: [126.70, 37.40, 127.30, 37.75], rings: [[far]] },
+    { code: "CLOSE", name: "좁은상권", bbox: [126.90, 37.50, 127.10, 37.70], rings: [[near]] },
   ]};
   assert.equal(matchArea({ lng: 126.95, lat: 37.55 }, boundary).code, "CLOSE");
 });
@@ -2172,8 +2215,10 @@ export function matchArea({ lng, lat }, boundary) {
 
     if (boundary.mode === "polygon") {
       if (area.bbox && !inBbox(point, area.bbox)) continue;
-      hit = area.rings.some((ring) => pointInPolygon(point, ring));
-      center = area.rings[0][0];
+      // part[0]=외곽링, part[1:]=구멍. 외곽 안에 있어도 구멍 안이면 밖이다.
+      hit = area.rings.some(([outer, ...holes]) =>
+        pointInPolygon(point, outer) && !holes.some((h) => pointInPolygon(point, h)));
+      center = area.rings[0][0][0];
     } else {
       const d = distanceMeters(point, area.center);
       hit = d <= area.radius_m;
