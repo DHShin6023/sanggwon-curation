@@ -75,16 +75,18 @@ def score(data: Normalized) -> pd.DataFrame:
         ).apply(percentile)
 
     # ── ① 수요: 3개 인구를 각각 백분위. 합성하지 않는다 ──
-    # 상권 단위 지표라 업종은 안 걸리지만 상권종류는 걸어야 한다
-    # (광역상권의 유동인구는 골목상권과 자릿수가 다르다).
-    demand = pd.DataFrame(index=areas.index)
+    # 다른 축과 똑같이 (업종 × 상권종류) 풀 안에서 매긴다. 상권 단위 지표라
+    # 전체 상권을 놓고 매기고 싶어지지만 그러면 안 된다 — 업종은 큰 상권에
+    # 몰려 있어서, 그 업종이 실제로 있는 상권들만 모아 놓으면 수요 점수가 위로
+    # 쏠린다. 실측(2026-08-08): 전체 기준으로 매겼을 때 풀 평균이 63.7~66.2점
+    # (균일하면 50), 반면 경쟁·활력·궁합은 49.8~50.0. 이 쏠림이 등급컷을
+    # 왜곡해 광역상권의 "상" 비율을 18.9%까지 떨어뜨렸다(골목 28.3%).
+    # 풀 기준으로 바꾸면 세 풀 모두 24~26%로 고르게 맞는다.
+    out = ind[["area_code", "industry_code", "area_type"]].copy()
     for target, source in (("demand_raw_resident", "resident_pop"),
                            ("demand_raw_worker", "worker_pop"),
                            ("demand_raw_footfall", "footfall")):
-        demand[target] = areas.groupby(
-            "area_type", group_keys=False)[source].apply(percentile)
-    out = ind[["area_code", "industry_code", "area_type"]].copy()
-    out = out.join(demand, on="area_code")
+        out[target] = by_pool(ind["area_code"].map(areas[source]))
 
     # 풀이 얇으면 순위 점수가 잡음이다 — n=3이면 가능한 값이 0/50/100 셋뿐이다.
     # 실측 18개 풀(92행)이 10행 미만. 어느 선부터 신뢰하지 않을지는 제품 판단이라

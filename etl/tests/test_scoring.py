@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -12,14 +13,10 @@ def _axis_df() -> pd.DataFrame:
         "area_type": ["alley", "alley", "metro", "metro"] * 2,
         "demand_raw_resident": [10, 40, 70, 100] * 2,
         "demand_raw_worker": [100, 70, 40, 10] * 2,
-        # 브리프 원안은 이 열을 demand_raw_resident와 동일한 [10,40,70,100]*2로
-        # 뒀다. CS1은 footfall(0.4)만, CS2는 resident(0.4)만 가중치를 주므로
-        # 두 열이 값까지 같으면 어떤 올바른 구현도 CS1/CS2를 구별할 수 없다
-        # (가중치 크기가 같은 두 열이 점별로 동일하면 가중합도 항상 같다 —
-        # 순수 산술적 필연). test_base_score_uses_group_specific_demand가
-        # 검증하려는 "그룹마다 다른 인구를 쓴다"를 이 값으로는 애초에 검증할
-        # 수 없어 resident와 다르게 바꿨다(Task 5, 2026-08-08).
-        "demand_raw_footfall": [100, 70, 40, 10] * 2,
+        # 세 수요축은 서로 다른 패턴이어야 한다. 값이 겹치면 축을 잘못 배선해도
+        # 테스트가 통과하고, resident와 같으면 그룹별 가중치 테스트 자체가
+        # 수학적으로 성립하지 않는다.
+        "demand_raw_footfall": [100, 10, 70, 40] * 2,
         "competition": [20, 40, 60, 80] * 2,
         "vitality": [20, 40, 60, 80] * 2,
         "fit": [20, 40, 60, 80] * 2,
@@ -74,6 +71,23 @@ def test_base_score_bounded():
     assert out["base_score"].between(0, 100).all()
 
 
+def test_unmapped_industry_raises():
+    """분류표에 없는 업종코드를 통과시키면 그 업종이 서울 전역에서 조용히
+    '판정 불가'가 되고, 경쟁 데이터 결측과 구분되지 않는다."""
+    df = _axis_df()
+    df.loc[0, "industry_code"] = "ZZZ"
+    with pytest.raises(ValueError, match="ZZZ"):
+        scoring.base_score(df, _assets())
+
+
+def test_grade_of_rejects_non_float64_nan():
+    """isinstance(x, float)는 np.float32 NaN에 False다 — 그냥 두면 없는 점수에서
+    '하' 등급이 지어져 나온다."""
+    for bad in (np.float32("nan"), np.float64("nan"), None, pd.NA):
+        with pytest.raises(ValueError):
+            scoring.grade_of(bad, [75.0, 50.0, 25.0])
+
+
 def test_missing_competition_withholds_the_grade():
     """경쟁축이 없으면 등급을 내지 않는다 (2026-08-08 결정).
 
@@ -93,7 +107,7 @@ def test_missing_competition_withholds_the_grade():
 def test_grades_are_even_across_pools():
     """골목상권 물건지가 등급에서 눌리면 안 된다 — 서비스가 후보를 못 걸러낸다.
 
-    업종 단위 컷 하나로 모든 상권종류를 끊는 설계의 전제(4축이 이미 풀 내부
+    업종 단위 컷 하나로 모든 상권종류를 끊는 설계의 전제(6축이 이미 풀 내부
     백분위이므로 풀마다 0~100을 고르게 채운다)를 실데이터로 확인한다.
     한 풀로 매기던 시절 골목상권의 백분위 중앙값은 40.4점이었다.
     """
@@ -109,9 +123,13 @@ def test_grades_are_even_across_pools():
         for s, c in zip(scored["base_score"], scored["industry_code"])
     ]
     share = scored.groupby("area_type")["grade"].value_counts(normalize=True).unstack()
+    # 실측(수정 후): 네 등급 모두 세 풀에서 24~26%. 밴드를 20~30%로 좁게 잡아야
+    # 축 하나가 풀 밖 기준으로 매겨지는 회귀를 잡는다 — 15~35%였다면 18.9%까지
+    # 무너진 상태도 통과했을 것이다.
     for pool in share.index:
-        top = share.loc[pool, "상"]
-        assert 0.15 <= top <= 0.35, f"{pool} 풀의 '상' 비율 {top:.1%} — 25% 근처여야 한다"
+        for grade in GRADES:
+            got = share.loc[pool, grade]
+            assert 0.20 <= got <= 0.30, f"{pool} 풀의 '{grade}' 비율 {got:.1%} — 25% 근처여야 한다"
 
 
 def test_grade_cuts_are_per_industry():

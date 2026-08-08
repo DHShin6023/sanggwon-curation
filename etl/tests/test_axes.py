@@ -87,6 +87,28 @@ def test_competition_is_missing_when_either_component_is():
     assert pd.isna(out.at[("A", "CS100001"), "competition"])
 
 
+def test_demand_is_scored_inside_the_pool():
+    """수요축도 다른 축과 같은 풀에서 매겨야 한다.
+
+    전체 상권을 놓고 매기면 업종이 큰 상권에 몰려 있는 탓에 풀 안에서 수요
+    점수가 위로 쏠린다(실측 풀 평균 63.7~66.2, 균일하면 50). 그 쏠림이
+    등급컷을 왜곡해 광역상권 "상" 비율을 18.9%까지 떨어뜨렸었다.
+    광역 상권의 인구만 키워도 골목 상권의 수요 점수는 움직이면 안 된다.
+    """
+    before = axes.score(_split_pools()).set_index(["area_code", "industry_code"])
+
+    shifted = _split_pools()
+    metro = shifted.areas["area_code"].isin(["C", "D"])
+    for col in ("resident_pop", "worker_pop", "footfall"):
+        shifted.areas.loc[metro, col] *= 1000.0
+    after = axes.score(shifted).set_index(["area_code", "industry_code"])
+
+    for area in ("A", "B"):
+        for col in ("demand_raw_resident", "demand_raw_worker", "demand_raw_footfall"):
+            key = (area, "CS100001")
+            assert before.at[key, col] == pytest.approx(after.at[key, col]), col
+
+
 def test_pool_size_is_emitted():
     """Task 5가 얇은 풀의 등급을 보류하려면 표본 크기를 알아야 한다."""
     out = axes.score(_split_pools())
