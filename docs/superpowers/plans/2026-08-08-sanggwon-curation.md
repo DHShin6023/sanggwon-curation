@@ -2117,7 +2117,10 @@ git commit -m "feat(engine): 패턴 감지 4종 (점수와 독립 레이어)"
 - Produces (`web/data/` 하위, 브라우저가 fetch하는 최종 계약):
   - `meta.json` — `{"period", "period_label", "generated_at", "region", "provisional", "grade_cuts", "industries": [{code, name, group}], "gu": {코드: 이름}, "sources": [...]}`
   - `boundary/{구코드}.json` — Task 3 출력 그대로
-  - `score/{구코드}.json` — `{"areas": {상권코드: {"name", "dong_code", "footfall", "resident_pop", "worker_pop", "industries": {업종코드: {"base": float, "store_count": int, "sales_per_store": float, "sales_trend": float|null, "patterns": [str], "axes": {...}}}}}}`
+  - `score/{구코드}.json` — `{"areas": {상권코드: {"name", "area_type", "dong_code", "footfall", "resident_pop", "household", "worker_pop", "industries": {업종코드: {"base": float|null, "store_count": int, "sales_per_store": float|null, "sales_trend": float|null, "patterns": [str], "patterns_unknown": [str], "pool_size": int, "axes": {...}}}}}}`
+    - `base`가 `null`이면 경쟁축 결측(365행)이라 **등급을 매기지 않는다** → 웹은 🔴 "분석 불가"로 렌더한다.
+    - `patterns_unknown`은 입력이 없어 판정하지 못한 패턴이다. `patterns`와 합치지 않는다 — "경고 없음"과 "확인 못 함"은 다른 말이다.
+    - `area_type`(alley/market/metro)은 등급이 어느 풀 기준인지 밝히기 위해 싣는다. 골목 "상"과 광역 "상"의 절대 매출은 다르다.
   - `dong/{구코드}.json` — 행정동 폴백용 동일 구조 (🟡 표기용)
   - `etl.build.main() -> None`
 
@@ -2155,10 +2158,39 @@ def test_score_file_shape():
     path = next((WEB_DATA_DIR / "score").glob("*.json"))
     payload = json.loads(path.read_text(encoding="utf-8"))
     area = next(iter(payload["areas"].values()))
-    assert {"name", "industries"}.issubset(area)
+    assert {"name", "area_type", "industries"}.issubset(area)
+    assert area["area_type"] in {"alley", "market", "metro"}
     entry = next(iter(area["industries"].values()))
-    assert {"base", "store_count", "patterns"}.issubset(entry)
+    assert {"base", "store_count", "patterns",
+            "patterns_unknown", "pool_size"}.issubset(entry)
     assert isinstance(entry["patterns"], list)
+    assert isinstance(entry["patterns_unknown"], list)
+
+
+def test_unjudgeable_rows_ship_null_base_not_zero():
+    """경쟁축 결측 365행은 등급을 매기지 않는다. base가 0으로 나가면 웹이
+    "최악 입지"로 렌더한다 — 없는 판정을 지어내는 것과 같다(스펙 10.3)."""
+    seen_null = False
+    for path in (WEB_DATA_DIR / "score").glob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for area in payload["areas"].values():
+            for entry in area["industries"].values():
+                assert entry["base"] is None or entry["base"] > 0, \
+                    "판정 불가가 0점으로 나갔다"
+                seen_null |= entry["base"] is None
+    assert seen_null, "판정 불가 행이 하나도 안 나왔다 — 필터링돼 버린 것 아닌가"
+
+
+def test_unknown_patterns_are_not_reported_as_absent():
+    """확인 못 한 패턴이 patterns에 섞이면 "경고 없음"으로 읽힌다."""
+    found = False
+    for path in (WEB_DATA_DIR / "score").glob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for area in payload["areas"].values():
+            for entry in area["industries"].values():
+                assert not set(entry["patterns"]) & set(entry["patterns_unknown"])
+                found |= bool(entry["patterns_unknown"])
+    assert found, "patterns_unknown이 전부 비었다 — 전달이 끊긴 것 아닌가"
 
 
 def test_no_percentage_success_field_anywhere():
@@ -2234,16 +2266,25 @@ def main() -> None:
     area_meta = data.areas.set_index("area_code")
     buckets: dict[str, dict] = {gu: {"areas": {}} for gu in SEOUL_GU}
 
+    # 조용히 버리지 않는다 — Task 3의 CoverageError와 같은 원칙(스펙 10.3).
+    # 여기서 continue로 넘기면 상권 하나가 화면에서 통째로 사라지는데
+    # 아무 흔적도 남지 않는다.
+    unknown_area = sorted(set(merged["area_code"].astype(str)) - set(area_meta.index))
+    if unknown_area:
+        raise ValueError(f"areas에 없는 상권코드 {len(unknown_area)}개: {unknown_area[:5]}")
+    stray_gu = sorted({str(g) for g in area_meta["gu_code"]} - set(buckets))
+    if stray_gu:
+        raise ValueError(f"SEOUL_GU 밖 자치구코드: {stray_gu}")
+
     for row in merged.itertuples():
         code = str(row.area_code)
-        if code not in area_meta.index:
-            continue
         gu = str(area_meta.at[code, "gu_code"])
-        if gu not in buckets:
-            continue
         info = area_meta.loc[code]
         bucket = buckets[gu]["areas"].setdefault(code, {
             "name": str(info["area_name"]),
+            # 등급은 같은 상권종류 안에서만 매겨진다. 화면이 "골목상권 기준"임을
+            # 밝히지 않으면 골목 "상"을 강남역급 매출로 오해한다(스펙 10.3).
+            "area_type": str(info["area_type"]),
             "dong_code": str(info["dong_code"]),
             "footfall": _num(info["footfall"]),
             "resident_pop": _num(info["resident_pop"]),
@@ -2257,6 +2298,11 @@ def main() -> None:
             "sales_per_store": _num(row.sales_per_store),
             "sales_trend": _num(row.sales_trend),
             "patterns": list(row.patterns or []),
+            # "경고 없음"과 "확인 못 함"은 다른 말이다. 합쳐서 내보내면 화면에서
+            # 구분이 사라진다 — 침몰상권은 실제로 1,101행이 미평가다(Task 6).
+            "patterns_unknown": list(row.patterns_unknown or []),
+            # 표본이 얇은 풀은 순위 점수가 잡음이다(10행 미만 풀 18개).
+            "pool_size": int(row.pool_size),
             "axes": {
                 "resident": _num(row.demand_raw_resident),
                 "worker": _num(row.demand_raw_worker),
