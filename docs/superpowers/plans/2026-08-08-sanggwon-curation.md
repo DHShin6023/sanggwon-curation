@@ -1142,6 +1142,28 @@ def test_competition_is_missing_when_either_component_is():
     assert pd.isna(out.at[("A", "CS100001"), "competition"])
 
 
+def test_demand_is_scored_inside_the_pool():
+    """수요축도 다른 축과 같은 풀에서 매겨야 한다.
+
+    전체 상권을 놓고 매기면 업종이 큰 상권에 몰려 있는 탓에 풀 안에서 수요
+    점수가 위로 쏠린다(실측 풀 평균 63.7~66.2, 균일하면 50). 그 쏠림이
+    등급컷을 왜곡해 광역상권 "상" 비율을 18.9%까지 떨어뜨렸었다.
+    광역 상권의 인구만 키워도 골목 상권의 수요 점수는 움직이면 안 된다.
+    """
+    before = axes.score(_split_pools()).set_index(["area_code", "industry_code"])
+
+    shifted = _split_pools()
+    metro = shifted.areas["area_code"].isin(["C", "D"])
+    for col in ("resident_pop", "worker_pop", "footfall"):
+        shifted.areas.loc[metro, col] *= 1000.0
+    after = axes.score(shifted).set_index(["area_code", "industry_code"])
+
+    for area in ("A", "B"):
+        for col in ("demand_raw_resident", "demand_raw_worker", "demand_raw_footfall"):
+            key = (area, "CS100001")
+            assert before.at[key, col] == pytest.approx(after.at[key, col]), col
+
+
 def test_pool_size_is_emitted():
     """Task 5가 얇은 풀의 등급을 보류하려면 표본 크기를 알아야 한다."""
     out = axes.score(_split_pools())
@@ -1326,16 +1348,18 @@ def score(data: Normalized) -> pd.DataFrame:
         ).apply(percentile)
 
     # ── ① 수요: 3개 인구를 각각 백분위. 합성하지 않는다 ──
-    # 상권 단위 지표라 업종은 안 걸리지만 상권종류는 걸어야 한다
-    # (광역상권의 유동인구는 골목상권과 자릿수가 다르다).
-    demand = pd.DataFrame(index=areas.index)
+    # 다른 축과 똑같이 (업종 × 상권종류) 풀 안에서 매긴다. 상권 단위 지표라
+    # 전체 상권을 놓고 매기고 싶어지지만 그러면 안 된다 — 업종은 큰 상권에
+    # 몰려 있어서, 그 업종이 실제로 있는 상권들만 모아 놓으면 수요 점수가 위로
+    # 쏠린다. 실측(2026-08-08): 전체 기준으로 매겼을 때 풀 평균이 63.7~66.2점
+    # (균일하면 50), 반면 경쟁·활력·궁합은 49.8~50.0. 이 쏠림이 등급컷을
+    # 왜곡해 광역상권의 "상" 비율을 18.9%까지 떨어뜨렸다(골목 28.3%).
+    # 풀 기준으로 바꾸면 세 풀 모두 24~26%로 고르게 맞는다.
+    out = ind[["area_code", "industry_code", "area_type"]].copy()
     for target, source in (("demand_raw_resident", "resident_pop"),
                            ("demand_raw_worker", "worker_pop"),
                            ("demand_raw_footfall", "footfall")):
-        demand[target] = areas.groupby(
-            "area_type", group_keys=False)[source].apply(percentile)
-    out = ind[["area_code", "industry_code", "area_type"]].copy()
-    out = out.join(demand, on="area_code")
+        out[target] = by_pool(ind["area_code"].map(areas[source]))
 
     # 풀이 얇으면 순위 점수가 잡음이다 — n=3이면 가능한 값이 0/50/100 셋뿐이다.
     # 실측 18개 풀(92행)이 10행 미만. 어느 선부터 신뢰하지 않을지는 제품 판단이라
@@ -1398,7 +1422,7 @@ def score(data: Normalized) -> pd.DataFrame:
 ```bash
 .venv/bin/python -m pytest etl/tests/test_axes.py -v
 ```
-Expected: 15 passed
+Expected: 16 passed
 
 전체 스위트도 함께 돌려 어댑터 계약 변경이 다른 데를 깨지 않았는지 본다:
 
@@ -1503,6 +1527,7 @@ if __name__ == "__main__":
 
 `etl/tests/test_scoring.py`:
 ```python
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -1517,7 +1542,10 @@ def _axis_df() -> pd.DataFrame:
         "area_type": ["alley", "alley", "metro", "metro"] * 2,
         "demand_raw_resident": [10, 40, 70, 100] * 2,
         "demand_raw_worker": [100, 70, 40, 10] * 2,
-        "demand_raw_footfall": [10, 40, 70, 100] * 2,
+        # 세 수요축은 서로 다른 패턴이어야 한다. 값이 겹치면 축을 잘못 배선해도
+        # 테스트가 통과하고, resident와 같으면 그룹별 가중치 테스트 자체가
+        # 수학적으로 성립하지 않는다.
+        "demand_raw_footfall": [100, 10, 70, 40] * 2,
         "competition": [20, 40, 60, 80] * 2,
         "vitality": [20, 40, 60, 80] * 2,
         "fit": [20, 40, 60, 80] * 2,
@@ -1572,6 +1600,23 @@ def test_base_score_bounded():
     assert out["base_score"].between(0, 100).all()
 
 
+def test_unmapped_industry_raises():
+    """분류표에 없는 업종코드를 통과시키면 그 업종이 서울 전역에서 조용히
+    '판정 불가'가 되고, 경쟁 데이터 결측과 구분되지 않는다."""
+    df = _axis_df()
+    df.loc[0, "industry_code"] = "ZZZ"
+    with pytest.raises(ValueError, match="ZZZ"):
+        scoring.base_score(df, _assets())
+
+
+def test_grade_of_rejects_non_float64_nan():
+    """isinstance(x, float)는 np.float32 NaN에 False다 — 그냥 두면 없는 점수에서
+    '하' 등급이 지어져 나온다."""
+    for bad in (np.float32("nan"), np.float64("nan"), None, pd.NA):
+        with pytest.raises(ValueError):
+            scoring.grade_of(bad, [75.0, 50.0, 25.0])
+
+
 def test_missing_competition_withholds_the_grade():
     """경쟁축이 없으면 등급을 내지 않는다 (2026-08-08 결정).
 
@@ -1607,9 +1652,13 @@ def test_grades_are_even_across_pools():
         for s, c in zip(scored["base_score"], scored["industry_code"])
     ]
     share = scored.groupby("area_type")["grade"].value_counts(normalize=True).unstack()
+    # 실측(수정 후): 네 등급 모두 세 풀에서 24~26%. 밴드를 20~30%로 좁게 잡아야
+    # 축 하나가 풀 밖 기준으로 매겨지는 회귀를 잡는다 — 15~35%였다면 18.9%까지
+    # 무너진 상태도 통과했을 것이다.
     for pool in share.index:
-        top = share.loc[pool, "상"]
-        assert 0.15 <= top <= 0.35, f"{pool} 풀의 '상' 비율 {top:.1%} — 25% 근처여야 한다"
+        for grade in GRADES:
+            got = share.loc[pool, grade]
+            assert 0.20 <= got <= 0.30, f"{pool} 풀의 '{grade}' 비율 {got:.1%} — 25% 근처여야 한다"
 
 
 def test_grade_cuts_are_per_industry():
@@ -1706,6 +1755,20 @@ def base_score(axis_df: pd.DataFrame, assets: DomainAssets) -> pd.DataFrame:
     out = axis_df.copy()
     group = out["industry_code"].map(assets.groups)
 
+    # 분류표에 없는 업종코드를 그냥 두면 모든 가중치가 0이 되어 base_score가
+    # NaN이 되고, 다운스트림에서는 "경쟁 데이터 없음"과 구분되지 않는다.
+    # 새 분기에 업종코드가 하나 늘어난 것만으로 서울 전역에서 그 업종이 조용히
+    # 사라진다 → 드러낸다.
+    unmapped = sorted(out.loc[group.isna(), "industry_code"].unique())
+    if unmapped:
+        raise ValueError(
+            f"industry_groups.json에 없는 업종코드 {len(unmapped)}개: {unmapped[:5]}. "
+            "분류표를 갱신할 것 — 임의로 넘기면 해당 업종이 통째로 판정 불가가 된다"
+        )
+    missing_group = sorted({g for g in group.unique() if g not in assets.weights})
+    if missing_group:
+        raise ValueError(f"axis_weights.json에 없는 업종그룹: {missing_group}")
+
     total = pd.Series(0.0, index=out.index)
     weight_sum = pd.Series(0.0, index=out.index)
 
@@ -1713,10 +1776,15 @@ def base_score(axis_df: pd.DataFrame, assets: DomainAssets) -> pd.DataFrame:
         w = group.map(lambda g: assets.weights.get(g, {}).get(key, 0.0)).astype(float)
         value = pd.to_numeric(out[column], errors="coerce")
         present = value.notna()
-        total += (value.fillna(0.0) * w).where(present, 0.0)
+        # .where(present, 0.0)가 이미 결측 행을 0으로 만든다. 여기에 fillna를
+        # 덧붙이면 "결측을 0으로 채운다"는 코드가 점수 계산 한복판에 남아
+        # 다음 사람을 오도한다 — 이 프로젝트에서 세 번 터진 결함이다.
+        total += (value * w).where(present, 0.0)
         weight_sum += w.where(present, 0.0)
 
-    out["base_score"] = (total / weight_sum.replace(0, np.nan)).clip(0, 100)
+    # 0~100 입력의 가중평균은 정의상 0~100을 벗어날 수 없다. clip을 걸면
+    # 상류에서 범위가 깨졌을 때 조용히 감춰지므로 걸지 않는다.
+    out["base_score"] = total / weight_sum.replace(0, np.nan)
     out["base_score"] = out["base_score"].where(out[REQUIRED_AXIS].notna())
     return out
 
@@ -1724,11 +1792,14 @@ def base_score(axis_df: pd.DataFrame, assets: DomainAssets) -> pd.DataFrame:
 def grade_cuts(scored: pd.DataFrame) -> dict[str, list[float]]:
     """업종별 75/50/25 분위. 스펙 7.2 — 등급은 반드시 동일 업종 안에서 매긴다.
 
-    상권종류(area_type)로는 더 쪼개지 않는다. base_score를 이루는 4축이 이미
+    상권종류(area_type)로는 더 쪼개지 않는다. base_score를 이루는 **6개 축 전부가**
     (업종 × 상권종류) 안의 백분위라 각 풀의 점수가 저마다 0~100을 채우고,
     따라서 업종 단위 컷 하나로도 풀 간 공평하다. 여기서 또 쪼개면 (업종 ×
     상권종류) 그룹 중 18개가 10행 미만이라 분위수가 잡음이 된다.
-    이 가정은 test_grades_are_even_across_pools가 지킨다.
+
+    "6개 축 전부"가 전제다. 수요 3축만 전체 상권 기준으로 매기던 시절에는 그
+    쏠림(풀 평균 63.7~66.2)이 그대로 새어나와 광역상권의 "상" 비율이 18.9%까지
+    떨어졌다(골목 28.3%). test_grades_are_even_across_pools가 이 전제를 지킨다.
     """
     cuts: dict[str, list[float]] = {}
     for code, group in scored.groupby("industry_code"):
@@ -1741,7 +1812,10 @@ def grade_cuts(scored: pd.DataFrame) -> dict[str, list[float]]:
 
 def grade_of(score: float, cuts: list[float]) -> str:
     """cuts = [상컷, 중상컷, 중하컷]"""
-    if score is None or (isinstance(score, float) and np.isnan(score)):
+    # isinstance(x, float)는 np.float32 NaN에 False라 그대로 통과해 "하"가
+    # 나온다 — 없는 점수에서 등급을 지어내는 셈. pd.isna는 float32·pd.NA·
+    # None을 전부 잡는다.
+    if score is None or pd.isna(score):
         raise ValueError("점수 없이 등급을 매기지 않는다")
     for boundary, grade in zip(cuts, GRADES):
         if score >= boundary:
