@@ -4,3 +4,7 @@ node_modules/
 .env.*
 *.log
 data/raw/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
