@@ -18,6 +18,16 @@
 //      precision.reason으로 구분해 넘긴다.
 //  F7  대안 0건일 때 "왜 0건인지"(다른 업종 자체가 없음 / 판정 실패로 제외됨 /
 //      확인했지만 더 나은 게 없었음)를 payload에 실어 render.js가 구분해 보여준다.
+//
+// ⚠️ 리뷰 라운드 2(2026-08-09) 반영 — 상세는 task-11-report.md의 "Fix round 2" 절.
+//  C1  entry.base(baseScore)를 narrate.js에 넘겨, "층수가 영향을 줬는가"를
+//      하드코딩 대신 실제 점수 비교로 판단하게 한다.
+//  I1  meta.json이 200이어도 모양이 불완전할 수 있다(캐시된 구버전 등) —
+//      validateMeta()로 부트스트랩 try 블록 안에서 필수 필드를 확인한다.
+//  M6  role="alert"는 에러 <p>에 있지 root에 없다 — root.removeAttribute
+//      ("role")는 아무 일도 안 하는 죽은 코드였다, 제거.
+//  M7  FLOOR_LABELS[floor]가 undefined면 그 문자열 그대로가 아니라 원본
+//      floor 코드를 보여준다.
 
 import { matchArea, resolvePrecision } from "./locate.js";
 import { judge, FLOOR_LABELS } from "./verdict.js";
@@ -33,19 +43,44 @@ const loadJson = async (path) => {
   return cache.get(path);
 };
 
+// I1(리뷰 라운드 2): meta.json이 200으로 응답해도 모양이 불완전할 수
+// 있다 — 예를 들어 브라우저 캐시가 649d7d3 이전(구버전, floor_config 없음)
+// meta.json을 들고 있는데 새 JS가 배포되면, `!meta` 가드는 통과하지만
+// `meta.floor_config.coefficients`에서 그대로 죽는다. fetch 성공 여부뿐
+// 아니라 필요한 필드가 실제로 있는지까지 부트스트랩 try 블록 안에서 확인한다.
+function validateMeta(m) {
+  const required = ["period_label", "sources", "industries", "grade_cuts", "floor_config", "gu"];
+  for (const key of required) {
+    if (m[key] == null) {
+      throw new Error(`meta.json에 "${key}" 필드가 없습니다(캐시된 구버전이거나 배포가 깨졌을 수 있습니다). 새로고침해 주세요.`);
+    }
+  }
+  if (!Array.isArray(m.industries) || !Array.isArray(m.sources)) {
+    throw new Error("meta.json의 industries/sources가 배열이 아닙니다. 새로고침해 주세요.");
+  }
+  const fc = m.floor_config;
+  if (typeof fc !== "object" || !fc.coefficients || typeof fc.warn_below !== "number" || typeof fc.min_coefficient !== "number") {
+    throw new Error("meta.json의 floor_config가 불완전합니다(캐시된 구버전 JS/데이터 조합일 수 있습니다). 새로고침해 주세요.");
+  }
+}
+
 // --- 부트스트랩 -------------------------------------------------------
-// meta.json 로드 실패(배포 중 404 등)가 여기서 예외로 죽으면 아래
-// addEventListener("submit", ...) 등록 자체가 실행되지 않는다. 그러면
-// "분석하기" 버튼은 그냥 네이티브 폼 제출을 일으켜 페이지가 새로고침되고
-// 사용자에게는 아무 설명도 없이 입력값만 날아간다(F4). meta 로드는 반드시
-// try/catch로 감싸고, submit 리스너는 그 성패와 무관하게 항상 등록한다.
+// meta.json 로드 실패(배포 중 404 등)나 불완전한 모양이 여기서 예외로
+// 죽으면 아래 addEventListener("submit", ...) 등록 자체가 실행되지 않는다.
+// 그러면 "분석하기" 버튼은 그냥 네이티브 폼 제출을 일으켜 페이지가
+// 새로고침되고 사용자에게는 아무 설명도 없이 입력값만 날아간다(F4). meta
+// 로드+검증은 반드시 같은 try/catch로 감싸고, submit 리스너는 그 성패와
+// 무관하게 항상 등록한다.
 let meta = null;
 let bootError = null;
 try {
-  meta = await loadJson("data/meta.json");
-  if (!meta) throw new Error("데이터를 불러오지 못했습니다(404). 잠시 후 새로고침해 주세요.");
+  const loaded = await loadJson("data/meta.json");
+  if (!loaded) throw new Error("데이터를 불러오지 못했습니다(404). 잠시 후 새로고침해 주세요.");
+  validateMeta(loaded);
+  meta = loaded; // 검증까지 통과한 뒤에만 meta를 채운다 — 부분 로드 상태로 아래 코드가 돌지 않게.
 } catch (err) {
   bootError = err;
+  meta = null;
   console.error("부트스트랩 실패:", err.message);
 }
 
@@ -59,15 +94,17 @@ if (meta) {
   if (sourcesEl) sourcesEl.textContent = `출처: ${meta.sources.join(" / ")}`;
 
   // meta.provisional: true는 "floor_config의 계수가 아직 실측이 아니라
-  // 잠정값"이라는 뜻이다(현재 6개 그룹 전부 1.0). 이걸 화면이 말하지
-  // 않으면 사용자는 층수 보정이 실제로 작동하고 있다고 오해한다 — 이
-  // 알림은 동시에 "잠정 계수인 채로 배포됐다"를 눈에 띄게 만드는 배포
-  // 안전장치이기도 하다(리뷰 F2).
+  // 잠정값"이라는 뜻이다. C1(리뷰 라운드 2): 예전 문구는 "반영되지 않고
+  // 있을 수 있습니다"로 방향을 하드코딩된 애매함으로 얼버무렸는데, 실제로는
+  // 지금 로드한 floor_config.coefficients를 직접 보면 전부 1.0인지 아닌지
+  // 확실히 알 수 있다 — 확실히 아는 걸 "있을 수 있다"고 하지 않는다.
   if (provisionalEl && meta.provisional) {
+    const allFloorCoefficientsAreOne = Object.values(meta.floor_config.coefficients)
+      .every((group) => Object.values(group).every((c) => c === 1));
     provisionalEl.hidden = false;
-    provisionalEl.textContent =
-      `⚠ 이 서비스의 층수 보정 계수는 아직 잠정값입니다(기준: ${meta.floor_basis ?? "heuristic"}). ` +
-      "등급에 층수 효과가 실제로는 반영되지 않고 있을 수 있습니다.";
+    provisionalEl.textContent = allFloorCoefficientsAreOne
+      ? "⚠ 이 서비스의 층수 보정 계수는 현재 전부 1.0(잠정값)입니다 — 층수는 지금 등급 계산에 전혀 영향을 주지 않습니다."
+      : `⚠ 이 서비스의 층수 보정 계수는 아직 잠정값입니다(기준: ${meta.floor_basis ?? "heuristic"}). 실제 현장 감각과 다를 수 있습니다.`;
   }
 
   assets = {
@@ -133,8 +170,11 @@ export async function analyze({ address, industryText, floor }) {
   const matched = boundary ? matchArea({ lng, lat }, boundary) : null;
   const precision = resolvePrecision({ area: matched, dongData, dongCode });
 
+  // M7: floor는 <select>가 5개 값으로 제한하지만, 방어적으로 라벨이 없는
+  // 값이 들어와도 "undefined"라는 글자를 화면에 그대로 찍지 않는다 — 원래
+  // 받은 코드 자체를 보여주는 편이 정직하다.
   const base = {
-    precision, industryName: industry.name, floorLabel: FLOOR_LABELS[floor],
+    precision, industryName: industry.name, floorLabel: FLOOR_LABELS[floor] ?? floor,
     verdict: null, narration: null, alternatives: [],
   };
 
@@ -196,8 +236,12 @@ export async function analyze({ address, industryText, floor }) {
     };
   }
 
+  // C1: floorBasis(narrate.js)가 "층수가 실제로 등급에 영향을 줬는가"를
+  // entry.base(층수 적용 전)와 verdict.score(적용 후)를 비교해 판단하므로
+  // baseScore를 함께 넘긴다 — 이게 없으면 narrate.js는 참/거짓 어느 쪽도
+  // 판단할 근거가 없다.
   const narration = templateNarration({
-    ...verdict, industryName: industry.name, areaName: area.name, floor,
+    ...verdict, industryName: industry.name, areaName: area.name, floor, baseScore: entry.base,
   });
 
   // 개정 (다): 배열이 아니라 {recommendations, skipped}다. skipped는
@@ -239,7 +283,6 @@ form.addEventListener("submit", async (event) => {
       floor: data.get("floor"),
     });
     renderResult(root, payload);
-    root.removeAttribute("role");
   } catch (error) {
     root.hidden = false;
     root.replaceChildren();

@@ -1,0 +1,47 @@
+// I4(리뷰 라운드 2): dom-stub.js가 모르는 id도 조용히 새 노드를 만들어주던
+// 버전에서는, index.html에서 요소 하나를 지워도(예: <datalist
+// id="industry-options"> 삭제, <p id="provisional-notice"> 삭제) main.test.js
+// 9개가 전부 초록불이었다 — 스텁이 구현과 항상 합의하도록 맞춰져 있어서
+// index.html이 실제로 그 id를 제공하는지는 아무도 확인하지 않았기 때문이다.
+//
+// 이 테스트는 정적 텍스트 검사만 한다(진짜 DOM 파서가 아니다) — main.js
+// 소스에서 `document.getElementById("...")` 문자열 리터럴을 전부 뽑고,
+// index.html 소스에서 `id="..."`를 전부 뽑아, 전자가 후자의 부분집합인지
+// 확인한다. jsdom 없이도 "코드가 참조하는 id가 마크업에 실제로 있다"는
+// 최소한의 계약은 지킨다.
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const root = new URL("../", import.meta.url);
+const mainSrc = fs.readFileSync(fileURLToPath(new URL("js/main.js", root)), "utf8");
+const htmlSrc = fs.readFileSync(fileURLToPath(new URL("index.html", root)), "utf8");
+
+function idsReferencedByMain() {
+  const ids = new Set();
+  const re = /getElementById\(\s*["']([^"']+)["']\s*\)/g;
+  for (const m of mainSrc.matchAll(re)) ids.add(m[1]);
+  return ids;
+}
+
+function idsDefinedInHtml() {
+  const ids = new Set();
+  const re = /\bid=["']([^"']+)["']/g;
+  for (const m of htmlSrc.matchAll(re)) ids.add(m[1]);
+  return ids;
+}
+
+test("main.js가 getElementById로 찾는 id는 index.html에 최소 1개 이상 있어야 한다", () => {
+  const referenced = idsReferencedByMain();
+  const defined = idsDefinedInHtml();
+  assert.ok(referenced.size > 0, "이 테스트가 실제로 뭔가 검사하고 있는지 확인 — main.js에서 getElementById 호출을 못 찾았다면 정규식이 깨진 것");
+  const missing = [...referenced].filter((id) => !defined.has(id));
+  assert.deepEqual(missing, [], `index.html에 없는 id를 main.js가 찾고 있다: ${missing.join(", ")}`);
+});
+
+test("index.html에는 datalist#industry-options와 p#provisional-notice가 있다(F11/F2의 실제 앵커)", () => {
+  const defined = idsDefinedInHtml();
+  assert.ok(defined.has("industry-options"));
+  assert.ok(defined.has("provisional-notice"));
+});

@@ -15,6 +15,12 @@ const PATTERN_TEXT = {
 const HIGH = 70;
 const LOW = 30;
 
+// 6개 축의 한글 라벨. I3(리뷰 라운드 2) — 결측 축을 사용자에게 알릴 때 쓴다.
+const AXIS_LABEL = {
+  footfall: "유동인구", resident: "배후 거주인구", worker: "직장인구",
+  competition: "경쟁", vitality: "매출 추세·지속성", fit: "업종 적합도",
+};
+
 // 표본이 이 미만이면 등급이 잡음일 수 있다는 사실을 화면이 드러내야 한다
 // (개정 블록 (라), poolSize는 등급을 매긴 표본 크기). render.js가 alt-card의
 // poolSize를 판단할 때도 같은 기준을 써야 해서 export한다 — 상수를 두 파일에
@@ -82,6 +88,20 @@ export function templateNarration(result) {
   if (isNum(axes.fit) && axes.fit <= LOW) push("caution", "이 상권의 소비 시간대·연령 구성이 해당 업종과 잘 맞지 않습니다");
   if (isNum(axes.fit) && axes.fit >= HIGH) push("positive", "상권의 소비 성격이 해당 업종과 잘 맞습니다");
 
+  // 리뷰 라운드 2 I3: null 축을 "하위권"으로 지어내지 않게 된 것(F3)과,
+  // 그 축이 아예 없었다는 사실을 조용히 삼키는 것은 다른 문제다.
+  // etl/engine/scoring.py의 base_score()는 결측 축을 가중치에서 빼고
+  // 나머지 축으로 재정규화한다 — 즉 그 업종에서 가장 중요한 축이 빠진 채
+  // 등급이 나왔을 수 있다(실측: 청계산원터골/한식음식점은 유동의존형인데
+  // footfall이 null이다). 감지된 패턴 하나엔 상자를 통째로 주면서 이건
+  // 안 보여주면 형평에 안 맞는다 — caution factor로 알린다.
+  const missingAxes = Object.keys(AXIS_LABEL).filter((key) => !isNum(axes[key]));
+  if (missingAxes.length > 0) {
+    const labels = missingAxes.map((key) => AXIS_LABEL[key]).join("·");
+    push("caution",
+      `${labels} 데이터가 없어 그 축을 빼고 나머지 축의 가중치를 다시 배분해 이 등급을 계산했습니다.`);
+  }
+
   // poolSize: 얇은 표본(< 30)은 등급 자체가 잡음일 수 있다는 사실을 숨기지
   // 않는다. 표본 크기를 알 수 없을 때(null)는 "얇다"고 단정하지 않는다 —
   // 그것도 없는 확신을 지어내는 것이다.
@@ -104,18 +124,54 @@ export function templateNarration(result) {
     : null;
 
   // floorBasis: floorNote와는 다른 진술이다 — "경고가 떴는가"가 아니라
-  // "층수가 이 등급 계산에 관여했고, 그 보정 방식 자체가 휴리스틱이다"라는
-  // 사실을 항상 알린다. 지금 배포된 floor_config 계수는 6개 그룹 전부
-  // 1.0(잠정값)이라 floorNote가 절대 뜨지 않는데, 그렇다고 "층수는 공공
-  // 데이터 기반 정밀 계산"이라고 오해하게 두면 안 된다(스펙 7.5, 리뷰 F2).
-  // judge()가 항상 floor를 받아 계산하므로(main.js가 verdict를 만들 때만
-  // templateNarration을 부르고, 그때 floor는 항상 있다) 조건 없이 만든다.
-  const floorBasis = {
-    text:
-      `${FLOOR_LABELS[result.floor]} 층수는 이 등급 계산에 반영됩니다. ` +
-      "층수 보정 계수는 공개 데이터가 아니라 현장 경험에 근거한 휴리스틱 추정입니다 " +
-      "(공공데이터에는 층별 매출이 존재하지 않습니다).",
-  };
+  // "층수가 실제로 이 등급에 영향을 줬는가"를 알린다.
+  //
+  // ⚠️ 리뷰 라운드 2 C1: 1라운드 버전은 "층수는 이 등급 계산에 반영됩니다"를
+  // 무조건 참으로 하드코딩했다. 그런데 배포된 floor_config 계수가 6개 그룹
+  // 전부 1.0(잠정값)이라, 성공한 모든 판정에서 실제로는 거짓이었다(예: 배화여대
+  // /한식음식점은 5개 층 전부 score 59.4786로 동일 — 층수가 아무것도 안
+  // 바꾼다). "반영 안 될 수도 있다"는 식으로 하드코딩된 반대쪽 문장을
+  // 쓰는 것도 똑같이 틀린 짓이다(신동환이 실계수를 채우면 그때는 거짓이
+  // 된다). 그래서 참/거짓 어느 문장도 하드코딩하지 않고, 매번
+  // entry.base(층수 적용 전, baseScore)와 verdict.score(적용 후)를 직접
+  // 비교해서 판단한다 — 실계수가 배포되면 코드를 안 고쳐도 자동으로
+  // 반대 방향 진실을 말하게 된다.
+  let floorBasis;
+  if (!isNum(result.baseScore)) {
+    // baseScore를 안 받은 호출(narrate.test.js의 BASE 픽스처 등)은 층수가
+    // 실제로 영향을 줬는지 판단할 데이터가 없다 — "영향 없음"도 "영향
+    // 있음"도 지어내지 않고 일반 고지만 한다.
+    floorBasis = {
+      text:
+        `${FLOOR_LABELS[result.floor]} 층수는 이 등급 계산의 입력값 중 하나입니다. ` +
+        "층수 보정 계수는 공개 데이터가 아니라 현장 경험에 근거한 휴리스틱 추정입니다.",
+    };
+  } else if (result.score === result.baseScore) {
+    // base*1.0은 부동소수점에서도 정확히 base와 같다 — "계수가 정확히
+    // 1.0이라 안 바뀌었다"고 말해도 되는 유일한 조건. baseScore가 0이면
+    // 어떤 계수를 곱해도 결과가 0이라 계수를 역산할 수 없다 — 그 경우는
+    // "계수가 1.0"이라고 단정하지 않는다.
+    floorBasis = result.baseScore !== 0
+      ? {
+          text:
+            `이번 판정에서는 ${FLOOR_LABELS[result.floor]} 층수가 등급에 아무 영향도 주지 않았습니다 ` +
+            "(적용된 층수 보정 계수가 1.0입니다). 층수 보정 계수는 공개 데이터가 아니라 현장 경험에 근거한 " +
+            "휴리스틱 추정이며, 현재는 잠정값 상태라 대부분의 판정에서 이렇게 나옵니다.",
+        }
+      : {
+          text:
+            `${FLOOR_LABELS[result.floor]} 층수가 등급 계산에 미친 영향은 이번 판정에서는 확인할 수 없습니다. ` +
+            "층수 보정 계수는 공개 데이터가 아니라 현장 경험에 근거한 휴리스틱 추정입니다.",
+        };
+  } else {
+    const ratio = result.baseScore ? (result.score / result.baseScore).toFixed(2) : null;
+    floorBasis = {
+      text:
+        `${FLOOR_LABELS[result.floor]} 층수가 이 등급 계산에 실제로 반영됐습니다` +
+        (ratio ? `(적용된 보정 계수 약 ${ratio}배)` : "") +
+        ". 층수 보정 계수는 공개 데이터가 아니라 현장 경험에 근거한 휴리스틱 추정입니다.",
+    };
+  }
 
   // patterns(경고가 붙음)와 patternsUnknown(확인할 데이터가 없었음)은 서로
   // 다른 진술이다 — 후자를 "경고 없음"으로 뭉개지 않는다. 두 종류를 모두

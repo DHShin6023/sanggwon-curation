@@ -78,36 +78,73 @@ function altPoolAndPatternNotes(alt) {
   return notes;
 }
 
-// F7 — 대안 0건: "다른 업종 자체가 없다" / "있었지만 판정 실패로 다 빠졌다" /
-// "확인했지만 이 자리엔 더 나은 게 없었다"는 서로 다른 사실이다. skipped가
-// console.warn으로만 남으면 화면엔 흔적이 없다 — 여기서 최소한 개수라도
-// 보여준다.
+// F1/F8이 "상"·"중상"만 실제로 추천할 만한 등급이라고 취급한다 — "중하"/
+// "하"는 verdict.js의 GRADE_MEANING 자체가 "권하지 않음"/"말립니다"라고
+// 말하는 등급이라, 그런 등급을 "더 맞는 업종"이라고 부르면 안 된다(I2).
+const GOOD_GRADES = new Set(["상", "중상"]);
+
+// F7/M1 — 대안 0건. 원안(라운드 1)은 세 갈래였는데, 리뷰가 지적한 대로
+// recommend()의 실제 알고리즘에서 그중 하나는 애초에 일어날 수 없다:
+// judge()가 성공한 후보는 반드시 scored에 들어가고 slice(0, limit)이 그걸
+// 그대로 돌려주므로, "판정엔 성공했는데 top-2에 못 들어 0건"이라는 상태는
+// 존재하지 않는다(scored가 비면 항상 추천도 0건, scored가 안 비면 추천도
+// 있다). 그 갈래(원안의 "확인했지만 더 나은 대안은 없었다")를 없애고,
+// 알고리즘이 실제로 만들 수 있는 두 갈래만 남긴다:
+//  - skippedCount >= otherCount: 전부 판정 실패(설정 결측 등)로 제외됨.
+//  - skippedCount < otherCount: 나머지는 판정엔 성공했지만 alternatives.js의
+//    filterByFloor가 이 층 적합도 기준(minCoefficient) 미달로 조용히
+//    뺐다는 뜻이다 — "안 맞았다"가 아니라 "이 층 기준 미달"이 정확하다.
+//    현재 배포된 층수 계수가 전부 1.0이라(잠정값) 이 갈래는 실데이터로는
+//    아직 안 밟히지만, 알고리즘상 가능한 상태라 문구를 남겨둔다.
 function emptyAlternativesNote(ctx) {
   if (!ctx || ctx.otherCount === 0) {
     return "이 상권에는 비교할 다른 업종 데이터가 없습니다.";
   }
-  if (ctx.skippedCount > 0) {
-    return `이 상권의 다른 업종 ${ctx.otherCount}개 중 ${ctx.skippedCount}개는 데이터 부족·설정 결측으로 ` +
-      "판정하지 못했고, 나머지는 이 자리에 추천할 만큼 적합하지 않았습니다.";
+  if (ctx.skippedCount >= ctx.otherCount) {
+    return `이 상권의 다른 업종 ${ctx.otherCount}개는 모두 데이터 부족·설정 결측으로 판정하지 못해 ` +
+      "대안을 추천할 수 없습니다.";
   }
-  return `다른 업종 ${ctx.otherCount}개를 확인했지만, 이 자리에 더 나은 대안은 없었습니다.`;
+  const remainder = ctx.otherCount - ctx.skippedCount;
+  return ctx.skippedCount > 0
+    ? `이 상권의 다른 업종 ${ctx.otherCount}개 중 ${ctx.skippedCount}개는 판정 실패로 제외됐고, ` +
+      `나머지 ${remainder}개는 이 층 적합도 기준을 통과하지 못해 대안으로 추천되지 않았습니다.`
+    : `이 상권의 다른 업종 ${ctx.otherCount}개는 이 층 적합도 기준을 통과하지 못해 대안으로 추천되지 않았습니다.`;
 }
 
 function renderAlternatives(root, payload) {
   const { alternatives, alternativesContext, verdict, industryName } = payload;
   const section = el("section", "alternatives");
 
-  // F8: recommend()는 top-2를 점수순으로만 뽑는다 — 물으신 업종보다 점수가
-  // 낮아도 후보에 오를 수 있다(중앙고등학교 실사례: 한식 "상" 대비 대안이
-  // 중상·중하). 모든 대안이 실제로 더 높은 점수일 때만 "더 맞는 업종"이라고
-  // 부른다. 그렇지 않으면 중립적인 제목을 쓰고, 낮은 카드마다 표시한다.
-  const allBetter = alternatives.length > 0 && alternatives.every((a) => a.score > verdict.score);
-  section.append(el("h2", null, allBetter ? "이 자리에 더 맞는 업종" : "이 상권의 다른 업종"));
+  // I2(리뷰 라운드 2): F8은 "asked보다 점수가 높은가"만 봤는데, 그 조건은
+  // 후보가 "중하"·"하"여도 만족될 수 있다(실측: 청계산원터골/한식음식점은
+  // "하"·score 28.66인데, 대안으로 뜨는 커피-음료·운동/경기용품도 둘 다
+  // "하"이면서 점수만 조금 더 높다 — "더 맞는 업종"이라고 부르면 verdict.js
+  // 자신의 GRADE_MEANING("말립니다")과 모순된다). "더 맞는 업종"이라는
+  // 헤딩은 상/중상 등급이면서 동시에 asked보다 점수가 높은 후보가 하나라도
+  // 있을 때만 쓴다.
+  const hasGenuinelyBetter = alternatives.some((a) => GOOD_GRADES.has(a.grade) && a.score > verdict.score);
+  section.append(el("h2", null, hasGenuinelyBetter ? "이 자리에 더 맞는 업종" : "이 상권의 다른 업종"));
 
   if (!alternatives.length) {
     section.append(el("p", "note", emptyAlternativesNote(alternativesContext)));
     root.append(section);
     return;
+  }
+
+  // I2: 대안 전부가 중하·하이면(청계산원터골류 — 127개 상권이 "전부 하"다,
+  // 흔한 경우다) "다른 업종도 없다"로 뭉개지 않고 그 자체를 정직하게
+  // 말한다. asked 자신도 안 좋은 등급이면(GRADE_MEANING이 이미 그렇게
+  // 말하고 있으니) 더 강하게, 대안만 안 좋으면 담담하게.
+  const allWeak = alternatives.every((a) => !GOOD_GRADES.has(a.grade));
+  if (allWeak) {
+    const askedAlsoWeak = !GOOD_GRADES.has(verdict.grade);
+    section.append(el(
+      "p", "note",
+      askedAlsoWeak
+        ? "물으신 업종뿐 아니라 이 상권의 다른 업종들도 대부분 중하·하 등급입니다 — " +
+          "측정 가능한 지표로는 이 자리가 어떤 업종에도 특별히 좋아 보이지 않습니다."
+        : "이 상권의 다른 업종들은 물으신 업종보다 등급이 낮습니다(중하·하). 참고용으로만 보십시오.",
+    ));
   }
 
   alternatives.forEach((alt, i) => {
@@ -120,6 +157,11 @@ function renderAlternatives(root, payload) {
       card.append(el(
         "p", "alt-note caution",
         `참고: 물으신 ${industryName}(${verdict.grade})보다 점수가 낮습니다.`,
+      ));
+    } else if (!GOOD_GRADES.has(alt.grade)) {
+      card.append(el(
+        "p", "alt-note caution",
+        `참고: 이 업종도 등급은 ${alt.grade}입니다 — 적극 추천할 수준은 아닙니다.`,
       ));
     }
     for (const note of altPoolAndPatternNotes(alt)) {
@@ -140,6 +182,12 @@ const NONE_REASON_TEXT = {
   no_data: (areaName) => `${areaName} 상권은 찾았지만, 이 업종의 경쟁점 데이터가 없어 등급을 매길 수 없습니다.`,
   config_error: "설정 오류로 이 업종·층수 조합을 판정할 수 없습니다. 없는 데이터를 지어내지 않기 위해 결과를 보여드리지 않습니다.",
 };
+// M2(리뷰 라운드 2): reason이 없거나 모르는 값이면 예전엔 out_of_bounds로
+// 조용히 떨어졌다 — "이 주소는 범위 밖입니다"라는 구체적인(그리고 틀릴 수
+// 있는) 주장을 기본값으로 깔아둔 셈이라 F6이 고치려던 것과 같은 종류의
+// 결함이었다. 모르면 모른다고 말한다.
+const NONE_REASON_FALLBACK = "이 요청을 분석하지 못한 정확한 이유를 확인할 수 없습니다. " +
+  "없는 원인을 지어내지 않기 위해 판정을 만들어내지 않습니다.";
 
 export function renderResult(root, payload) {
   root.replaceChildren();
@@ -180,10 +228,12 @@ export function renderResult(root, payload) {
       }
     } else {
       // precision.level === "none". reason으로 세 원인을 구분한다(F6).
-      const reason = precision.reason ?? "out_of_bounds";
-      const text = NONE_REASON_TEXT[reason];
+      // reason이 없거나 알 수 없는 값이면 NONE_REASON_FALLBACK으로
+      // 떨어진다 — out_of_bounds를 기본값으로 가정하지 않는다(M2).
+      const text = precision.reason ? NONE_REASON_TEXT[precision.reason] : undefined;
+      const message = typeof text === "function" ? text(areaName) : (text ?? NONE_REASON_FALLBACK);
       head.append(el("p", "grade none", "분석 불가"));
-      head.append(el("p", "note", typeof text === "function" ? text(areaName) : (text ?? NONE_REASON_TEXT.out_of_bounds)));
+      head.append(el("p", "note", message));
     }
     root.append(head);
     return;
@@ -191,18 +241,28 @@ export function renderResult(root, payload) {
 
   head.append(
     el("p", `grade grade-${verdict.grade}`, `${verdict.grade} · ${verdict.meaning}`),
-    el("p", "rank", `이 상권 ${industryName} 중 ${verdict.rank}`),
+    // I6(리뷰 라운드 2): "이 상권 {업종} 중 {rank}"는 틀린 문장이었다.
+    // etl/engine/scoring.py의 grade_cuts()가 industry_code로만 묶고
+    // area_type으로는 안 쪼갠다(docstring: "상권종류로는 더 쪼개지
+    // 않는다") — 즉 등급컷·순위는 이 상권 하나가 아니라 서울 전역의
+    // 같은 업종을 대상으로 매겨진다.
+    el("p", "rank", `${industryName} 기준(서울 전역, 같은 업종) ${verdict.rank}`),
   );
 
-  // F1: 등급은 같은 종류의 상권(골목/전통시장/광역) 안에서만 비교된다 —
-  // etl/build.py가 이 사실을 위해 area_type을 실어 보낸다. 화면이 이걸
-  // 말하지 않으면 골목상권의 "상"과 광역상권의 "상"을 같은 크기로 오해한다.
+  // F1/I6: area-type 문장은 위 rank 문장과 짝을 이뤄야 모순이 안 생긴다.
+  // 왜 "서울 전역 기준 하나"로 매겨도 공정한가 하면 — grade_cuts()가
+  // 기준으로 삼는 base_score를 이루는 6개 축 자체가 이미 (업종 ×
+  // 상권종류) 풀 안에서의 백분위이기 때문이다(etl/engine/axes.py). 그래서
+  // "순위는 전역 기준, 그 순위를 만드는 세부 지표는 같은 상권종류 안에서
+  // 비교"라는 두 문장이 동시에 참이다. 절대 매출 규모가 상권종류마다
+  // 다르다는 사실은 그대로 남긴다.
   if (areaType) {
     const label = AREA_TYPE_LABEL[areaType] ?? areaType;
     head.append(el(
       "p", "area-type",
-      `채점 풀: ${label} — 이 등급은 ${label}끼리 안에서의 순위입니다. ` +
-      "상권 종류가 다르면 절대 매출 규모가 다릅니다.",
+      `이 순위의 바탕이 된 유동인구·경쟁 등 세부 지표는 ${label} 안에서만 비교한 값입니다 — ` +
+      "그래야 상권 종류가 달라도 하나의 등급 기준으로 공정합니다. " +
+      "상권 종류가 다르면 절대 매출 규모는 다릅니다.",
     ));
   }
   root.append(head);
