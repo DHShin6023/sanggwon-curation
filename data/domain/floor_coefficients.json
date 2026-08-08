@@ -3,6 +3,7 @@
   "basis": "heuristic",
   "_note": "공공데이터에 층별 매출이 존재하지 않는다. 이 계수는 데이터 산출값이 아니라 도메인 휴리스틱이며 화면에 그 성격을 표기한다 — 스펙 7.5.",
   "warn_below": 0.75,
+  "min_coefficient": 0.6,
   "coefficients": {
     "유동의존형": {
       "B1": 1.0,

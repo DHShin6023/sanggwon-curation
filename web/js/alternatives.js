@@ -1,26 +1,21 @@
 // 대안 업종 추천. 스펙 8.
 //
 // 추가 데이터도 추가 로직도 없다 — 이미 만든 판정 엔진(judge())을 상권 내 전
-// 업종에 한 번 더 돌리고 필터 두 겹을 통과한 상위 2개를 뽑는 것뿐이다.
+// 업종에 한 번 더 돌리고 필터를 통과한 상위 2개를 뽑는 것뿐이다.
 //
-// ⚠️ 필터 두 겹은 지금 둘 다 무력하다(provisional):
-//    - data/domain/startup_filter.json의 excluded는 []다 → 필터①이 아무것도
-//      거르지 않는다. 이게 채워지기 전에는 의원·치과의원·한의원·약국 같은
-//      자격/자본 장벽 업종이 최고점이면 그대로 대안으로 뜬다 — 스펙 8.2 위반.
-//    - data/domain/floor_coefficients.json의 모든 계수가 1.0이다 → 필터②도
-//      사실상 항등 통과다.
-//    두 파일 다 신동환이 실값을 채우기 전까지는 공개 배포 게이트다.
+// 필터는 「그 층에서 되는 업종」 한 겹뿐이다(2026-08-08 신동환 결정, 스펙 8.2).
+// 이전 설계에는 「일반 예비창업자가 열 수 있는 업종」 필터가 한 겹 더 있었으나
+// 폐기했다 — 이 기능은 "출점지에 잘 맞는 업종"을 알려주는 것이지 "당신이 열 수
+// 있는가"를 판단하지 않는다. 따라서 의원·약국 같은 업종이 상위로 올라오는 것은
+// 결함이 아니라 의도된 출력이며, 별도 표기도 붙이지 않는다.
+//
+// ⚠️ 남은 한 겹도 지금은 무력하다: data/domain/floor_coefficients.json의 모든
+//    계수가 1.0인 잠정값이라 층수 필터가 사실상 항등 통과다. 신동환이 실계수를
+//    채우기 전까지 이 파일은 공개 배포 게이트다.
 
 import { judge } from "./verdict.js";
 
-// 필터 ① 「열 수 있는 업종」 — 자격증·수억 자본이 필요한 업종을 걸러낸다.
-// 이게 없으면 데이터상 최고점인 병원·약국이 상위에 올라온다.
-export function filterOpenable(codes, startupFilter) {
-  const excluded = new Set(startupFilter?.excluded ?? []);
-  return codes.filter((code) => !excluded.has(code));
-}
-
-// 필터 ② 「그 층에서 되는 업종」 — 2층 물건에 세탁편의점을 추천하면 헛다리다.
+// 필터 「그 층에서 되는 업종」 — 2층 물건에 세탁편의점을 추천하면 헛다리다.
 //
 // verdict.js가 floorCoefficient에서 고친 것과 같은 결함군: "이 업종군은 그
 // 층에서 실제로 계수가 낮다"와 "이 업종군/층수가 floorTable에 아예 없다"는
@@ -97,16 +92,25 @@ export function recommend({ area, meta, assets, floor, askedCode, limit = 2 }) {
     ? { code: askedCode, name: names.get(askedCode) ?? askedCode }
     : null;
 
+  // minCoefficient는 floor_coefficients.json의 min_coefficient에서 온다.
+  // 조용한 기본값(`?? 0.6`)을 두지 않는다 — 설정이 안 실린 채 배포되면 필터가
+  // 있는 척만 하고 아무것도 거르지 않는다. 이 프로젝트에서 반복해 잡아온
+  // "결측을 정상으로 읽는" 결함군이라 여기서도 즉시 던진다.
+  if (typeof assets.minCoefficient !== "number") {
+    throw new Error(
+      "assets.minCoefficient가 없다 — floor_coefficients.json의 min_coefficient를 실어야 한다"
+    );
+  }
+
   const skipped = [];
 
-  let codes = Object.keys(area.industries ?? {}).filter((c) => c !== askedCode);
-  codes = filterOpenable(codes, assets.startupFilter);
+  const codes = Object.keys(area.industries ?? {}).filter((c) => c !== askedCode);
 
   const { passed: floorPassed, excluded: floorExcluded } = filterByFloor(codes, {
     groups: assets.groups,
     floor,
     floorTable: assets.floorTable,
-    minCoefficient: assets.startupFilter?.min_coefficient ?? 0.6,
+    minCoefficient: assets.minCoefficient,
   });
   for (const item of floorExcluded) {
     skipped.push({
@@ -115,10 +119,9 @@ export function recommend({ area, meta, assets, floor, askedCode, limit = 2 }) {
       reason: `층수 필터 설정 결측: ${item.detail}`,
     });
   }
-  codes = floorPassed;
 
   const scored = [];
-  for (const code of codes) {
+  for (const code of floorPassed) {
     const cuts = meta.grade_cuts[code];
     const entry = area.industries[code];
     if (!cuts || entry?.base == null) {
