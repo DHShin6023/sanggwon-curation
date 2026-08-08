@@ -78,7 +78,7 @@ def normalize() -> Normalized:
             src = seoul_api.load(dataset)
             src = _at(src, str(src[_PERIOD].astype(str).max()))
         agg = src.assign(_v=_num(src[field])).groupby(
-            src[_AREA].astype(str))["_v"].sum().rename(target)
+            src[_AREA].astype(str))["_v"].sum(min_count=1).rename(target)
         areas = areas.merge(agg, left_on="area_code", right_index=True, how="left")
 
     areas = areas.reindex(columns=AREA_COLUMNS)
@@ -100,7 +100,7 @@ def normalize() -> Normalized:
     sc = pd.Series(_num(stores_cur["STOR_CO"]).values, index=_pair(stores_cur))
     ind["store_count"] = keys.map(sc).astype("float").fillna(0).astype(int)
     ind["sales_per_store"] = (
-        ind["sales_total"].div(ind["store_count"].where(ind["store_count"] > 0)).fillna(0.0))
+        ind["sales_total"].div(ind["store_count"].where(ind["store_count"] > 0)))
 
     old_sales = pd.Series(_num(old["THSMON_SELNG_AMT"]).values, index=_pair(old))
     old_sales = old_sales.groupby(level=[0, 1]).sum()
