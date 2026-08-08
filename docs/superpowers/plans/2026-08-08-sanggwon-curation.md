@@ -94,7 +94,9 @@ Task 12                            (AI 붙이기 — 품질 개선만)
 Task 13                            (검증 세트 대조 + 도메인 자산 확정)
 ```
 
-**Task 1이 분기 지점이다.** Task 3의 구현이 A/B로 갈리지만 두 분기 모두 동일한 인터페이스(`locate_area()`)와 동일한 출력 포맷(`{"mode": "polygon"|"circle", ...}`)을 만족하므로, Task 4 이후와 웹 코드는 분기의 영향을 받지 않는다.
+**Task 1이 분기 지점이었고, 2026-08-08 SHP 실물 검증으로 분기 A(폴리곤)로 확정됐다.**
+1,650개 폴리곤이 API 상권코드와 100% 일치함을 확인했다(`docs/data-schema-report.md`).
+등가반경 원 근사 경로는 흐르는 데이터가 없어 계획에서 제거했다. Task 3 이후는 폴리곤 전용이다.
 
 ---
 
@@ -236,7 +238,7 @@ curl -s "http://openapi.seoul.go.kr:8088/${SEOUL_API_KEY}/json/TbgisTrdarRelm/1/
 ```
 Expected: `"CODE":"INFO-000"`. `INFO-100`(인증키 오류)이나 `ERROR-3xx`가 나오면 키가 아직 승인 전이다.
 
-- [ ] **Step 4: SHP 분기 판정을 리포트에 기록**
+- [ ] **Step 4: SHP 분기 판정을 리포트에 기록** *(2026-08-08 완료 — 분기 A)*
 
 ```bash
 ls -la data/raw/seoul_area_shp/ 2>/dev/null || echo "SHP 없음"
@@ -249,8 +251,7 @@ ls -la data/raw/seoul_area_shp/ 2>/dev/null || echo "SHP 없음"
 
 - [ ] **분기 A — 폴리곤 확보.** `data/raw/seoul_area_shp/` 에 `.shp`/`.dbf`/`.shx`/`.prj` 존재.
       → Task 3은 `_load_polygon()` 경로로 구현. `requirements-geo.txt` 설치 필요.
-- [ ] **분기 B — 폴리곤 없음.** `seoul_area.csv` 의 중심점 + 영역면적만 사용.
-      → Task 3은 `_load_circle()` 경로로 구현. 등가반경 = √(면적/π).
+- [x] ~~분기 B — 폴리곤 없음. 등가반경 √(면적/π) 원 근사~~ → **불필요.** 분기 A 확정으로 제거
 
 판정일: ____
 판정 근거: ____
@@ -794,17 +795,13 @@ git commit -m "feat(etl): 공통 지표 계약 스키마 + 서울 어댑터"
   - `etl.geometry.boundary.build() -> dict[str, dict]` — 자치구코드 → 브라우저에 그대로 내려갈 경계 JSON.
     반환 형태는 분기와 무관하게 아래 둘 중 하나이며, `mode` 필드로 구분한다.
     ```jsonc
-    // 분기 A
     {"mode": "polygon", "areas": [{"code": "3110001", "name": "...",
       "bbox": [minLng, minLat, maxLng, maxLat],
       "rings": [[[lng, lat], ...]]}]}
-    // 분기 B
-    {"mode": "circle", "areas": [{"code": "3110001", "name": "...",
-      "center": [lng, lat], "radius_m": 187.3}]}
     ```
-  - `etl.geometry.boundary.MODE: str` — `"polygon"` 또는 `"circle"`
+  - `etl.geometry.boundary.MODE: str` — `"polygon"`
 
-**★ 이 태스크가 Task 1의 분기를 흡수한다.** 아래 두 구현 중 Task 1 Step 4에서 `[x]` 표시한 쪽만 작성한다. 이후 태스크는 어느 쪽이든 동일하게 동작한다.
+**★ 이 태스크가 Task 1의 분기를 흡수했고, 결과는 폴리곤이다.** 출력 JSON은 `"mode": "polygon"` 하나만 존재한다.
 
 - [ ] **Step 1: 분기와 무관한 테스트 작성**
 
@@ -816,8 +813,8 @@ from etl.config import SEOUL_GU
 from etl.geometry import boundary
 
 
-def test_mode_is_declared():
-    assert boundary.MODE in ("polygon", "circle")
+def test_mode_is_polygon():
+    assert boundary.MODE == "polygon"
 
 
 def test_build_covers_gu_codes():
@@ -836,8 +833,7 @@ def test_coordinates_are_wgs84_inside_seoul():
     result = boundary.build()
     for payload in result.values():
         for area in payload["areas"]:
-            lng, lat = (area["center"] if payload["mode"] == "circle"
-                        else area["rings"][0][0])
+            lng, lat = area["rings"][0][0]
             assert 126.7 < lng < 127.3, f"{area['code']} 경도 이상: {lng}"
             assert 37.4 < lat < 37.7, f"{area['code']} 위도 이상: {lat}"
 
@@ -849,17 +845,29 @@ def test_serialisable_and_bounded_size():
         assert size < 2_000_000, f"{gu} 경계 {size}바이트 — 단순화 필요"
 
 
-def test_circle_radius_matches_area_size():
-    if boundary.MODE != "circle":
-        return
-    import math
+def test_all_areas_covered():
+    """SHP 1,650개가 자치구 버킷에 빠짐없이 담겨야 한다."""
+    total = sum(len(p["areas"]) for p in boundary.build().values())
+    assert total == 1650, f"{total}개만 담김 — 누락 {1650 - total}개"
 
-    from etl.adapters import seoul
-    sizes = seoul.normalize().areas.set_index("area_code")["area_size"]
+
+def test_rings_are_closed():
+    """point-in-polygon은 닫힌 링을 전제한다."""
     for payload in boundary.build().values():
         for area in payload["areas"]:
-            expected = math.sqrt(float(sizes[area["code"]]) / math.pi)
-            assert abs(area["radius_m"] - expected) < 1.0
+            for ring in area["rings"]:
+                assert len(ring) >= 4
+                assert ring[0] == ring[-1], f"{area['code']} 링이 닫히지 않음"
+
+
+def test_bbox_contains_rings():
+    """bbox 프리필터가 실제 링을 감싸야 한다. 어긋나면 매칭이 조용히 실패한다."""
+    for payload in boundary.build().values():
+        for area in payload["areas"]:
+            min_lng, min_lat, max_lng, max_lat = area["bbox"]
+            for ring in area["rings"]:
+                for lng, lat in ring:
+                    assert min_lng <= lng <= max_lng and min_lat <= lat <= max_lat
 ```
 
 - [ ] **Step 2: 테스트 실패 확인**
@@ -898,9 +906,10 @@ PY
 
 ✅가 붙은 EPSG 코드를 `docs/data-schema-report.md`에 기록하고 다음 Step의 `SOURCE_CRS`에 넣는다.
 
-- [ ] **Step 4a: 【분기 A — 폴리곤】 `etl/geometry/boundary.py` 구현**
+- [ ] **Step 4: `etl/geometry/boundary.py` 구현**
 
-> Task 1 Step 4에서 **분기 A**를 선택한 경우에만 이 Step을 수행한다. 분기 B면 건너뛰고 Step 4b로 간다.
+> **분기 A(폴리곤) 확정** — 2026-08-08 SHP 실물 검증 완료(`docs/data-schema-report.md`).
+> 등가반경 원 근사 분기는 사문화되어 계획에서 제거했다.
 
 ```bash
 .venv/bin/pip install -r etl/requirements-geo.txt
@@ -961,65 +970,18 @@ def build() -> dict[str, dict]:
     return buckets
 ```
 
-- [ ] **Step 4b: 【분기 B — 등가반경 원】 `etl/geometry/boundary.py` 구현**
-
-> Task 1 Step 4에서 **분기 B**를 선택한 경우에만 이 Step을 수행한다.
-
-```python
-"""상권 경계 생성. 원본에 폴리곤이 없어 중심점 + 등가반경 원으로 근사한다.
-
-⚠️ 근사임을 잊지 말 것. 실제 골목상권은 도로를 따라 길쭉한 형태가 많아
-원 근사는 경계 부근에서 오분류를 낸다. 화면의 정밀도 표기(스펙 10.3)와
-반드시 함께 노출한다.
-"""
-import math
-
-from pyproj import Transformer
-
-from etl.adapters import seoul
-from etl.config import SEOUL_GU
-
-MODE = "circle"
-SOURCE_CRS = "EPSG:5181"   # ← Step 3 실측값으로 교체
-
-_to_wgs84 = Transformer.from_crs(SOURCE_CRS, "EPSG:4326", always_xy=True)
-
-
-def equivalent_radius_m(area_size_m2: float) -> float:
-    """면적이 같은 원의 반지름. 스펙 9.2.1 폴백."""
-    return math.sqrt(float(area_size_m2) / math.pi)
-
-
-def build() -> dict[str, dict]:
-    areas = seoul.normalize().areas
-    buckets: dict[str, dict] = {}
-
-    for row in areas.itertuples():
-        gu = str(row.gu_code)
-        if gu not in SEOUL_GU or not row.area_size or row.area_size <= 0:
-            continue
-        lng, lat = _to_wgs84.transform(float(row.x), float(row.y))
-        buckets.setdefault(gu, {"mode": MODE, "areas": []})["areas"].append({
-            "code": str(row.area_code),
-            "name": str(row.area_name),
-            "center": [round(lng, 6), round(lat, 6)],
-            "radius_m": round(equivalent_radius_m(row.area_size), 1),
-        })
-    return buckets
-```
-
 - [ ] **Step 5: 테스트 통과 확인**
 
 ```bash
 .venv/bin/python -m pytest etl/tests/test_boundary.py -v
 ```
-Expected: 6 passed (분기 B는 6개 전부, 분기 A는 `test_circle_radius_matches_area_size`가 즉시 return하여 실질 5개 검증).
+Expected: 8 passed
 
 - [ ] **Step 6: 커밋**
 
 ```bash
 git add etl/geometry/ etl/tests/test_boundary.py etl/requirements-geo.txt docs/data-schema-report.md
-git commit -m "feat(etl): 상권 경계 생성 (분기 확정: <polygon|circle>)"
+git commit -m "feat(etl): 상권 경계 폴리곤 생성 + 자치구 분할"
 ```
 
 ---
@@ -1871,6 +1833,7 @@ def main() -> None:
             "dong_code": str(info["dong_code"]),
             "footfall": _num(info["footfall"]),
             "resident_pop": _num(info["resident_pop"]),
+            "household": _num(info["household"]),   # 스펙 7.1 배후세대
             "worker_pop": _num(info["worker_pop"]),
             "industries": {},
         })
@@ -2072,11 +2035,11 @@ git commit -m "feat(etl): 빌드 파이프라인 + 자치구 분할 JSON 출력 
 - Produces:
   - `pointInPolygon([lng, lat], ring) -> boolean`
   - `distanceMeters([lng1, lat1], [lng2, lat2]) -> number`
-  - `matchArea({lng, lat}, boundary) -> {code, name} | null`
+  - `matchArea({lng, lat}, boundary) -> {code, name} | null` — 폴리곤 전용
   - `resolvePrecision({area, dongData, dongCode}) -> {level: "area"|"dong"|"none", badge, label}`
     - `badge`는 `"🟢"|"🟡"|"🔴"`, `label`은 `"상권 단위 분석"|"행정동 단위 분석"|"분석 불가"`
 
-**분기 무관 설계:** `matchArea()`는 `boundary.mode`를 보고 point-in-polygon 또는 원 내부 판정으로 갈린다. Task 3이 어느 분기로 갔든 이 함수 하나만 두 경우를 처리하면 나머지 웹 코드는 영향받지 않는다.
+**폴리곤 전용.** Task 3이 분기 A로 확정돼 `mode`는 항상 `"polygon"`이다. 원 근사 경로는 실제로 흐르는 데이터가 없으므로 구현하지 않는다 — 다만 `mode`가 `"polygon"`이 아니면 조용히 빈 결과를 내는 대신 즉시 던져서, 나중에 포맷이 바뀌면 여기서 터지게 한다.
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -2109,20 +2072,19 @@ test("matchArea: polygon 모드", () => {
   assert.equal(matchArea({ lng: 128.0, lat: 37.55 }, boundary), null);
 });
 
-test("matchArea: circle 모드", () => {
-  const boundary = { mode: "circle", areas: [
-    { code: "C1", name: "원상권", center: [126.9780, 37.5665], radius_m: 300 },
-  ]};
-  assert.equal(matchArea({ lng: 126.9781, lat: 37.5666 }, boundary).code, "C1");
-  assert.equal(matchArea({ lng: 126.9900, lat: 37.5800 }, boundary), null);
+test("matchArea: polygon 외 모드는 조용히 넘기지 않고 던진다", () => {
+  const boundary = { mode: "circle", areas: [] };
+  assert.throws(() => matchArea({ lng: 126.95, lat: 37.55 }, boundary), /polygon/);
 });
 
 test("matchArea: 겹칠 때 더 가까운 중심을 고른다", () => {
-  const boundary = { mode: "circle", areas: [
-    { code: "FAR",   center: [126.9800, 37.5665], radius_m: 5000 },
-    { code: "CLOSE", center: [126.9781, 37.5666], radius_m: 5000 },
+  const near = [[126.90, 37.50], [127.10, 37.50], [127.10, 37.70], [126.90, 37.70], [126.90, 37.50]];
+  const far  = [[126.70, 37.40], [127.30, 37.40], [127.30, 37.75], [126.70, 37.75], [126.70, 37.40]];
+  const boundary = { mode: "polygon", areas: [
+    { code: "FAR",   name: "넓은상권", bbox: [126.70, 37.40, 127.30, 37.75], rings: [far] },
+    { code: "CLOSE", name: "좁은상권", bbox: [126.90, 37.50, 127.10, 37.70], rings: [near] },
   ]};
-  assert.equal(matchArea({ lng: 126.9780, lat: 37.5665 }, boundary).code, "CLOSE");
+  assert.equal(matchArea({ lng: 126.95, lat: 37.55 }, boundary).code, "CLOSE");
 });
 
 test("resolvePrecision: 상권 안이면 🟢", () => {
