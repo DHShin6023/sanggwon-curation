@@ -52,3 +52,42 @@ test("index.html에는 datalist#industry-options와 p#provisional-notice가 있�
 // 엔드포인트를 걷어내면서 OpenRouter 호출 자체가 없어져 지킬 대상이 사라졌다.
 // 남은 브라우저→워커 호출은 /geocode 하나뿐이고, 카카오는 건당 과금이 아니라
 // 무료 할당량이라 같은 규칙이 적용되지 않는다(worker/README.md 참고).
+
+// ── 배포 경로 계약 ──────────────────────────────────────────────────
+//
+// GitHub Pages는 프로젝트 저장소를 **하위 경로**로 서비스한다:
+//   https://dhshin6023.github.io/sanggwon-curation/
+// 그래서 자원 경로가 "/data/meta.json"처럼 슬래시로 시작하면 도메인 루트를
+// 가리켜 404가 난다. 상대경로("data/meta.json")여야 한다.
+//
+// 이 결함은 **로컬에서는 절대 안 잡힌다** — 로컬 서버는 web/를 루트로 띄우니
+// 절대경로도 잘 동작한다. 배포해야만 드러나고, 그때는 사이트 전체가 죽는다.
+// 그래서 소스를 직접 읽어 고정한다.
+
+const jsSources = ["js/main.js", "js/render.js", "js/locate.js", "js/verdict.js",
+                   "js/alternatives.js", "js/narrate.js"]
+  .map((f) => [f, fs.readFileSync(fileURLToPath(new URL(f, root)), "utf8")]);
+
+test("자원 경로는 상대경로여야 한다 — Pages 하위 경로에서 깨지지 않게", () => {
+  const offenders = [];
+
+  for (const [name, src] of jsSources) {
+    // fetch("/...") / loadJson("/...") 형태만 본다. 워커 주소(${PROXY}/geocode)는
+    // 절대 URL이라 해당 없다.
+    for (const m of src.matchAll(/(?:fetch|loadJson)\(\s*["'`]\/[^"'`]*/g)) {
+      offenders.push(`${name}: ${m[0]}`);
+    }
+  }
+  for (const m of htmlSrc.matchAll(/\b(?:src|href)=["']\/[^"']*/g)) {
+    offenders.push(`index.html: ${m[0]}`);
+  }
+
+  assert.deepEqual(offenders, [],
+    `슬래시로 시작하는 경로는 Pages 하위 경로에서 404가 난다(로컬에서는 멀쩡하다): ${offenders.join(", ")}`);
+});
+
+test("이 계약이 실제로 뭔가 보고 있는지 — 검사 대상 소스가 비어 있지 않다", () => {
+  assert.ok(jsSources.every(([, src]) => src.length > 0));
+  assert.match(mainSrc, /loadJson\("data\/meta\.json"\)/,
+    "meta.json을 상대경로로 읽는 지점이 사라졌다면 이 계약의 정규식도 확인할 것");
+});
