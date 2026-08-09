@@ -1,5 +1,7 @@
 // 화면 진입점. 스펙 10.2 "AI가 완전히 죽어도 판정은 정상 출력된다"를 구조로
-// 강제한다 — 이 파일에는 AI 호출이 없다. Task 12는 문장 품질만 더한다.
+// 강제한다 — Task 11까지로 서비스는 이미 기능적으로 완결돼 있고, Task 12가
+// 더한 AI 두 곳(업종매핑 입구·해설 출구)은 **둘 다 폴백이 먼저 있는 자리**에만
+// 붙는다. 어느 쪽이 실패해도 등급·근거·대안은 그대로 나온다.
 //
 // ⚠️ 2026-08-08 개정 블록 반영:
 //  (가) 자산은 web/data/meta.json 하나에서만 온다.
@@ -32,7 +34,7 @@
 import { matchArea, resolvePrecision } from "./locate.js";
 import { judge, FLOOR_LABELS } from "./verdict.js";
 import { recommend } from "./alternatives.js";
-import { templateNarration } from "./narrate.js";
+import { templateNarration, aiNarration } from "./narrate.js";
 import { renderResult } from "./render.js";
 
 const PROXY = "https://sanggwon-proxy.<계정>.workers.dev";  // Task 12에서 실제 주소로 교체
@@ -117,19 +119,45 @@ if (meta) {
   periodEl.textContent = "데이터를 불러오지 못했습니다. 새로고침해 주세요.";
 }
 
-// 업종 매핑: Task 12까지는 이름 부분일치 폴백만 쓴다 (스펙 10.2 입구 폴백).
+// 업종 매핑(AI 입구). 로컬 매칭을 먼저 전부 시도하고, 거기서 못 찾았을 때만
+// AI를 부른다 — OpenRouter 무료 티어가 하루 50건이라 로컬로 끝낼 수 있는
+// 입력에 할당량을 쓰면 안 된다(개정 (라)).
+//
 // 정확히 일치하면 그걸 우선한다 — datalist가 실제 업종명을 보여주므로
 // 대부분의 정상 입력은 여기서 끝난다. 아주 짧은 입력(길이<2)은 부분일치를
 // 시도하지 않는다 — "점" 한 글자가 "한식음식점" 등 거의 모든 음식점류와
 // 매치되는 것처럼, 부분일치가 오탐을 낼 위험이 커진다.
-function mapIndustry(text) {
-  if (!meta) return null;
-  const q = (text ?? "").trim();
-  if (!q) return null;
+function mapIndustryLocal(q) {
   const exact = meta.industries.find((i) => i.name === q);
   if (exact) return exact;
   if (q.length < 2) return null;
   return meta.industries.find((i) => i.name.includes(q) || q.includes(i.name)) ?? null;
+}
+
+async function mapIndustry(text) {
+  if (!meta) return null;
+  const q = (text ?? "").trim();
+  if (!q) return null;
+
+  const local = mapIndustryLocal(q);
+  if (local) return local;
+
+  // AI 폴백. 실패(미배포·네트워크·한도 초과)는 조용히 삼키고 null로 떨어져
+  // 호출부가 "목록에서 선택해 주세요"를 띄운다(스펙 10.2 입구 폴백).
+  // 워커는 한도 초과 시 429가 아니라 200 {code: null}로 답한다(개정 (나)3).
+  try {
+    const res = await fetch(`${PROXY}/map-industry`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: q, candidates: meta.industries }),
+    });
+    if (!res.ok) return null;
+    const { code } = await res.json();
+    // 모델이 목록에 없는 코드를 지어낼 수 있다 — 실제 meta.industries에
+    // 있는 코드일 때만 받아들인다. 없으면 업종을 지어내지 않고 null이다.
+    return meta.industries.find((i) => i.code === code) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // datalist: 사용자가 실제로 존재하는 업종명을 볼 수 있게 한다 — 폼이
@@ -155,11 +183,13 @@ export async function analyze({ address, industryText, floor }) {
     throw new Error(bootError?.message ?? "서비스 초기화에 실패했습니다. 새로고침해 주세요.");
   }
 
-  const industry = mapIndustry(industryText);
+  const industry = await mapIndustry(industryText);
   if (!industry) throw new Error("업종을 인식하지 못했습니다. 목록에서 선택해 주세요.");
 
-  // Task 12 이전이므로 프록시가 없다 — geocode()는 여기서 실패하는 게
-  // 정상이다(스펙 10.2). 실패는 위로 던져서 submit 핸들러가 메시지를 보여준다.
+  // 워커 배포 전까지는 PROXY에 `<계정>` 리터럴이 박혀 있어 geocode()가 여기서
+  // 실패하는 게 정상이다(개정 (바)). 지오코딩만은 폴백이 없다 — 좌표를 모르면
+  // 어느 상권인지 알 수 없고, 모르는 채로 등급을 지어낼 수는 없다. 실패는
+  // 위로 던져서 submit 핸들러가 메시지를 보여준다.
   const { lng, lat, gu_code: gu, dong_code: dongCode } = await geocode(address);
   const [boundary, scores, dongData] = await Promise.all([
     loadJson(`data/boundary/${gu}.json`),
@@ -240,9 +270,16 @@ export async function analyze({ address, industryText, floor }) {
   // entry.base(층수 적용 전)와 verdict.score(적용 후)를 비교해 판단하므로
   // baseScore를 함께 넘긴다 — 이게 없으면 narrate.js는 참/거짓 어느 쪽도
   // 판단할 근거가 없다.
-  const narration = templateNarration({
+  const narrationInput = {
     ...verdict, industryName: industry.name, areaName: area.name, floor, baseScore: entry.base,
-  });
+  };
+  const narration = templateNarration(narrationInput);
+
+  // Task 12 (AI 출구). 워커에 보내는 payload와 validateNarration이 대조하는
+  // payload가 같은 객체여야 한다 — 모델이 실제로 본 수치만 "지어낸 게 아닌
+  // 수치"로 인정된다. 실패·검증 탈락은 전부 null이고, 그때 화면에는 아래
+  // 템플릿 해설만 남는다(스펙 11: 사용자에게 오류를 노출하지 않는다).
+  const aiText = await aiNarration(narrationInput, { endpoint: `${PROXY}/narrate` });
 
   // 개정 (다): 배열이 아니라 {recommendations, skipped}다. skipped는
   // 조용히 버리지 않는다 — console.warn으로 남긴다.
@@ -261,7 +298,7 @@ export async function analyze({ address, industryText, floor }) {
 
   return {
     ...base, areaName: area.name, areaType: area.area_type,
-    verdict, narration, alternatives: recommendations,
+    verdict, narration: { ...narration, aiText }, alternatives: recommendations,
     alternativesContext: { otherCount, skippedCount: skipped.length },
   };
 }

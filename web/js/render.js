@@ -267,6 +267,25 @@ export function renderResult(root, payload) {
   }
   root.append(head);
 
+  // Task 12: AI 해설. narrate.js의 validateNarration()을 통과한 문장만 여기
+  // 도달한다(통과 못 하면 main.js가 aiText를 안 싣는다). AI가 죽었거나 아직
+  // 배포 전이면 aiText 자체가 없고, 그때는 아무것도 그리지 않는다 — "AI
+  // 해설 없음" 같은 빈 자리도 남기지 않는다.
+  //
+  // 고지를 함께 붙이는 이유: 이 페이지의 다른 모든 문장은 룰엔진이 만든
+  // 것이고 이 문단만 생성모델이 쓴 것이다. 어느 쪽인지 구분되지 않으면
+  // 사용자는 AI 문장까지 계산 결과로 읽는다.
+  if (narration.aiText) {
+    const box = el("div", "ai-narration");
+    box.append(
+      el("p", null, narration.aiText),
+      el("p", "ai-narration-note",
+        "※ 위 문단은 아래 데이터를 바탕으로 AI가 쓴 요약입니다. " +
+        "등급과 근거 수치는 AI가 아니라 규칙으로 계산된 값입니다."),
+    );
+    root.append(box);
+  }
+
   renderFactors(root, narration.factors);
   renderFloorNotes(root, narration);
   renderPatternNotes(root, narration.patternNotes);

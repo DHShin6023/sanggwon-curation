@@ -24,6 +24,13 @@ button { padding:.85rem; border:0; border-radius:8px; background:var(--fg); colo
 .dong-fact { font-size:.9rem; margin:.5rem 0 0; }
 .area-type { font-size:.8rem; color:var(--muted); margin:.35rem 0 0; }
 .rank { color:var(--muted); margin:0 0 1.5rem; }
+/* AI 해설(Task 12). 이 페이지에서 유일하게 생성모델이 쓴 문단이라, 규칙으로
+   계산된 나머지와 시각적으로 구분되게 둔다. AI가 없거나 검증에 걸리면 이
+   블록 자체가 렌더되지 않는다. */
+.ai-narration { margin:0 0 1.5rem; padding:1rem; background:#f7f8fa;
+                border:1px solid var(--line); border-radius:8px; }
+.ai-narration p { margin:0; }
+.ai-narration-note { margin:.6rem 0 0 !important; font-size:.75rem; color:var(--muted); }
 .factors { list-style:none; padding:0; display:grid; gap:.5rem; }
 .factor.positive { color:var(--pos); }
 .factor.negative { color:var(--neg); }

@@ -198,3 +198,148 @@ export function templateNarration(result) {
     patternNotes,
   };
 }
+
+// ── AI 해설 (출구). 실패하면 조용히 null을 반환하고 호출부가 템플릿으로 떨어진다. ──
+// OpenRouter 무료 티어는 50 RPD로 공개 서비스에 턱없이 부족하다(스펙 9.2.3).
+// 따라서 캐싱은 선택이 아니라 필수다. 같은 (상권·업종·층수·등급)은 문장이 같아도 된다.
+
+export function cacheKey(result) {
+  return [result.areaName, result.industryName, result.floor, result.grade,
+          (result.patterns ?? []).join("|")].join("::");
+}
+
+const MIN_LEN = 20;
+const MAX_LEN = 600;
+
+const GRADE_CLAIM = /(?<![가-힣])(중상|중하|상|하)\s*등급/g;
+
+// 단위가 붙은 숫자만 본다. "억원"·"만원"을 "원"보다 앞에 둬야 잘리지 않는다.
+const NUMBER_WITH_UNIT = /([0-9][0-9,]*(?:\.[0-9]+)?)\s*(억원|만원|원|명|개|배)/g;
+const UNIT_SCALE = { 억원: 1e8, 만원: 1e4, 원: 1, 명: 1, 개: 1, 배: 1 };
+
+// payload 안에 실제로 들어 있는 수를 전부 긁어모은다. 중첩 객체(axes 등)도
+// 훑되 순환 참조에 걸리지 않게 깊이를 제한한다.
+function collectNumbers(value, out = new Set(), depth = 0) {
+  if (depth > 6) return out;
+  if (typeof value === "number" && Number.isFinite(value)) out.add(value);
+  else if (Array.isArray(value)) for (const v of value) collectNumbers(v, out, depth + 1);
+  else if (value && typeof value === "object") {
+    for (const v of Object.values(value)) collectNumbers(v, out, depth + 1);
+  }
+  return out;
+}
+
+// AI가 돌려준 문장을 화면에 올리기 전에 코드로 다시 본다. 통과하면 (trim된)
+// 문장을, 하나라도 어기면 null을 돌려준다 — 호출부는 null을 받으면 조용히
+// 템플릿 해설로 떨어진다(스펙 11, 사용자에게 오류를 노출하지 않는다).
+//
+// 프롬프트는 검증이 아니다. "지어내지 마라"라고 시스템 프롬프트에 쓰는 것과
+// 지어낸 문장을 걸러내는 것은 다른 일이고, 여기가 이 서비스에서 생성모델이
+// 직접 문장을 만드는 유일한 지점이라 여기서 못 막으면 막을 곳이 없다.
+//
+// ⚠️ 이 검사의 한계 — 잡지 못하는 것을 잡는다고 읽지 말 것.
+//   규칙 4(지어낸 수치)는 **단위가 붙은 아라비아 숫자**(원/만원/억원/명/개/배)만
+//   본다. 즉 매출·점포수·인구 같은 통계 날조는 잡지만, 다음은 전혀 못 잡는다:
+//     · 단위 없는 숫자 ("상위 30" 같은 표현)
+//     · 한글 수사 ("마흔 곳", "세 배")
+//     · 위 목록에 없는 단위 (층·건·년·평 등)
+//     · 숫자가 아닌 사실의 날조 ("이 골목은 최근 재개발이 확정됐습니다")
+//     · payload에 우연히 같은 수가 있는 경우 (예: 백분위 92를 "92개"라고 써도 통과)
+//   반대 방향의 오탐도 있다. payload에서 파생됐지만 그대로는 들어 있지 않은
+//   정당한 수(예: 점포수 차이, 계산된 배수)는 거부되어 템플릿으로 떨어진다 —
+//   틀린 문장을 보여주는 쪽보다 낫다고 보고 이 방향을 택했다.
+//   규칙 3(등급 모순)도 「X 등급」 형태만 본다. 「등급은 상입니다」처럼 어순이
+//   뒤집힌 형태는 못 잡는다 — 그 형태를 잡으려면 「등급은 상권 평균보다」류를
+//   오탐하게 되어, 오탐을 피하는 쪽을 택했다.
+export function validateNarration(text, result) {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (trimmed.length < MIN_LEN || trimmed.length > MAX_LEN) return null;
+
+  // 규칙 2 — 확률·퍼센트. 이 서비스는 "성공 확률"을 계산하지 않는다.
+  // 모델이 그런 수를 말하면 그건 전부 지어낸 것이다(스펙 프롬프트 규칙 2).
+  if (/%|퍼센트|확률/.test(trimmed)) return null;
+
+  // 규칙 3 — 등급 모순. 판정은 룰엔진이 하고 AI는 그걸 설명만 한다.
+  // 맨 includes("상")은 「이 상권은」·「기대 이상」·「상황」을 전부 오탐한다.
+  // 「등급」이라는 낱말에 바로 붙은 형태만 등급 단정으로 본다.
+  // 앞에 한글이 붙은 경우(「최상 등급」)는 별개의 낱말이므로 제외한다.
+  // 긴 후보(중상·중하)를 짧은 후보(상·하)보다 먼저 둬야 「중상 등급」이
+  // 「상 등급」으로 잘못 잘리지 않는다.
+  for (const [, claimed] of trimmed.matchAll(GRADE_CLAIM)) {
+    if (claimed !== result?.grade) return null;
+  }
+
+  // 규칙 4 — 지어낸 수치. 아래 "이 검사의 한계" 주석을 반드시 함께 읽을 것.
+  const known = collectNumbers(result);
+  for (const [, digits, unit] of trimmed.matchAll(NUMBER_WITH_UNIT)) {
+    const shown = Number(digits.replace(/,/g, ""));
+    if (!Number.isFinite(shown)) return null;
+    const scale = UNIT_SCALE[unit];
+    // 표기된 자릿수만큼만 반올림 오차를 허용한다. "1.2억원"은 소수 첫째
+    // 자리까지 쓴 표기이므로 ±0.05억원, "1,200만원"은 ±0.5만원까지 같은
+    // 값으로 본다 — money()가 실제로 하는 반올림을 그대로 되짚는 폭이다.
+    const decimals = (digits.split(".")[1] ?? "").length;
+    const tolerance = scale / 10 ** decimals / 2;
+    const value = shown * scale;
+    let supported = false;
+    for (const n of known) {
+      if (Math.abs(n - value) <= tolerance) { supported = true; break; }
+    }
+    if (!supported) return null;
+  }
+
+  return trimmed;
+}
+
+const memory = new Map();
+
+// Node에서는 `globalThis.localStorage`를 읽기만 해도 ExperimentalWarning이
+// stderr로 나온다(--localstorage-file 미지정). 캐시는 브라우저 전용 관심사라
+// window가 있을 때만 접근한다 — 테스트는 window/localStorage 대역을 직접
+// 세팅해서 이 경로를 그대로 탄다.
+function storage() {
+  if (typeof globalThis.window === "undefined") return null;
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;   // Safari 프라이빗 모드 등에서 접근 자체가 던진다
+  }
+}
+
+export async function aiNarration(result, { endpoint, timeoutMs = 4000 } = {}) {
+  const key = cacheKey(result);
+  if (memory.has(key)) return memory.get(key);
+
+  const store = storage();
+  // localStorage는 배포를 건너 살아남는다 — 검증 규칙이 생기거나 바뀌기 전에
+  // 저장된 문장이 그대로 화면에 올라가면 검증을 넣은 의미가 없다. 읽을 때도
+  // 다시 통과시킨다.
+  const stored = validateNarration(store?.getItem(`narr:${key}`), result);
+  if (stored) { memory.set(key, stored); return stored; }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${endpoint}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ payload: result }),
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    // 워커는 한도 초과·모델 사망 시 429가 아니라 200 {text: null}로 응답한다
+    // (개정 (나)3/(다)) — 여기서 새 분기를 만들지 않고 기존 폴백을 그대로 탄다.
+    const { text } = await res.json();
+    // 반환 직전에 반드시 검증한다. 캐시에는 통과한 문장만 넣는다(개정 (가)).
+    const valid = validateNarration(text, result);
+    if (!valid) return null;
+    memory.set(key, valid);
+    store?.setItem(`narr:${key}`, valid);
+    return valid;
+  } catch {
+    return null;   // 네트워크·타임아웃·파싱 실패 전부 여기로. 사용자에게 노출하지 않는다.
+  } finally {
+    clearTimeout(timer);
+  }
+}

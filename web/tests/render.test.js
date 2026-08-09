@@ -321,3 +321,42 @@ test("M4: 대안 카드의 얇은 표본 경고는 THIN_POOL 경계에서 정확
   assert.match(cards[0].textContent, /표본 .+ 기준/, `poolSize=${THIN_POOL - 1}(THIN_POOL 미만)은 얇은 표본 경고가 붙어야 한다`);
   assert.doesNotMatch(cards[1].textContent, /표본 .+ 기준/, `poolSize=${THIN_POOL}(THIN_POOL과 같음)은 경고가 안 붙어야 한다`);
 });
+
+// ---------------------------------------------------------------------
+// Task 12: AI 해설. 있으면 요인 목록 위에 문단으로, 없으면 아무것도 하지
+// 않는다 — 빈 자리나 "AI 해설 없음" 같은 흔적을 남기지 않는다.
+// ---------------------------------------------------------------------
+
+const AI_TEXT = "서교동에서 한식음식점을 여시려는 자리입니다. 통행량은 나쁘지 않지만 경쟁이 만만치 않습니다.";
+
+test("Task 12: narration.aiText가 있으면 요인 목록 위에 문단으로 나온다", () => {
+  const root = new FakeNode("section");
+  renderResult(root, areaPayload({
+    narration: { ...NARRATION, aiText: AI_TEXT },
+    verdict: { ...VERDICT },
+  }));
+
+  const box = root.query("ai-narration");
+  assert.ok(box, "ai-narration 노드가 있어야 한다");
+  assert.match(box.textContent, /통행량은 나쁘지 않지만/);
+
+  const classes = root.children.map((c) => c.className);
+  assert.ok(classes.indexOf("ai-narration") < classes.indexOf("factors"),
+    "AI 해설은 요인 목록(ul.factors)보다 위에 와야 한다");
+});
+
+test("Task 12: AI 해설에는 그 문단이 AI가 쓴 것이고 등급은 규칙이 계산했다는 고지가 붙는다", () => {
+  const root = new FakeNode("section");
+  renderResult(root, areaPayload({ narration: { ...NARRATION, aiText: AI_TEXT } }));
+  const note = root.query("ai-narration-note");
+  assert.ok(note, "AI가 쓴 문단임을 밝히는 고지가 있어야 한다");
+  assert.match(note.textContent, /AI/);
+  assert.match(note.textContent, /등급/);
+});
+
+test("Task 12: aiText가 없으면(AI 실패·미배포) 아무 흔적도 남기지 않는다", () => {
+  const root = new FakeNode("section");
+  renderResult(root, areaPayload()); // NARRATION에 aiText 없음
+  assert.equal(root.query("ai-narration"), null);
+  assert.doesNotMatch(root.textContent, /AI/);
+});
