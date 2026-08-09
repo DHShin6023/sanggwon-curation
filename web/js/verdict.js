@@ -6,11 +6,16 @@
 // ⚠️ 층수 계수는 공공데이터 산출값이 아니라 도메인 휴리스틱이다.
 //    공공데이터에 층별 매출이 존재하지 않는다 — 화면에 그 성격을 표기한다.
 //
-// ⚠️ data/domain/floor_coefficients.json은 현재 provisional 상태다: 6개 그룹
-//    전부 계수가 1.0이라 applyFloor는 사실상 항등함수이고 floorWarning은
-//    실 데이터로는 절대 발동하지 않는다. 이 파일의 로직은 브리핑이 준 합성
-//    FLOOR_TABLE(실제로 변화하는 계수)로 테스트해야 검증된다 — 출하된 JSON을
-//    돌려서 "동작 확인됨"이라고 결론 내리지 않는다.
+// ⚠️ 2026-08-09: 신동환 확정 계수가 들어오면서 이 파일이 **실제로 동작하기
+//    시작했다.** 예전 주석은 "6개 그룹 전부 1.0이라 applyFloor는 항등함수이고
+//    floorWarning은 절대 발동하지 않는다"였는데 셋 다 지금은 거짓이다:
+//    7개 그룹, 계수 0.5~1.0, warn_below(0.75) 미만 조합이 8개라 경고가 뜬다.
+//    (1층만 7개 그룹 전부 1.0인데, 이건 잠정값이라서가 아니라 1층이 상대값의
+//    기준점이기 때문이다.)
+//
+//    `provisional: true`는 여전히 유효하다 — 값이 정해진 것과 실제와 맞는지
+//    확인된 것은 다르고, 화면 배너가 그 사실을 밝힌다. 검증은 런칭 후
+//    실사용으로 한다(Task 13 폐기, 2026-08-09).
 
 export const FLOORS = ["B1", "F1", "F2", "F3P", "DETACHED"];
 export const FLOOR_LABELS = {
@@ -111,7 +116,19 @@ export function judge({ entry, cuts, group, floor, floorTable, warnBelow }) {
     score,
     grade: gradeOf(score, cuts),
     meaning: GRADE_MEANING[gradeOf(score, cuts)],
-    rank: rankLabel(score, cuts),
+    // ⚠️ rank는 **층수 적용 전 base**로 낸다. score로 내면 안 된다.
+    //
+    // cuts는 base_score 분포의 분위수다(scoring.py의 grade_cuts). 층수로 깎인
+    // score를 안 깎인 cuts에 대면 서울 전역 순위가 아니라 아무것도 아닌 값이
+    // 나온다. 실제로 그렇게 돼 있었고, 화곡역 4번/화장품(base 88.90 — 서울
+    // 화장품 중 1등, 상위 컷은 60.60)이 3층에서 「하위 50%」로 표시됐다.
+    // 화면 문장이 「서울 전역, 같은 업종」이라고 못박고 있으니 명백한 거짓이다.
+    //
+    // 순위는 **자리**의 속성이고, 층수는 그 위에 얹는 사용자의 선택이다.
+    // 그래서 등급(층수 포함)과 순위(자리 자체)가 서로 다른 얘기를 할 수 있고,
+    // 그게 오히려 이 서비스가 해줘야 할 말이다 — "자리는 서울 상위권인데
+    // 3층이라 이 업종엔 중하로 본다". render.js가 그렇게 읽히도록 쓴다.
+    rank: rankLabel(entry.base, cuts),
     warning: floorWarning({ group, floor, floorTable, warnBelow }),
     patterns: entry.patterns ?? [],
     // patterns_unknown: "경고 없음"과 "확인 못 함"은 다른 진술이다. 전자를

@@ -169,10 +169,25 @@ test("C1: baseScore를 안 주면(구버전 호출부 등) 영향 유무를 단�
   assert.match(n.floorBasis.text, /휴리스틱/);
 });
 
-test("C1: score === baseScore면 '영향 없음'을 정직하게 말한다(현재 실배포 상태)", () => {
+test("C1/SB3: 1층에서 계수가 1.0인 건 '영향 없음'이 아니라 '기준점'이라고 말한다", () => {
+  // SB3(최종 리뷰): 예전엔 층에 상관없이 "층수가 등급에 아무 영향도 주지
+  // 않았습니다 … 잠정값 상태라 대부분의 판정에서 이렇게 나옵니다"였다.
+  // 1층은 기본 선택지라 이 문장이 제일 많이 읽히는데, 원인(기준점이라 1.0이지
+  // 잠정값이라서가 아니다)도 빈도(35개 중 8개)도 둘 다 거짓이었다.
+  const n = templateNarration({ ...BASE, floor: "F1", score: 59.4786, baseScore: 59.4786 });
+  assert.match(n.floorBasis.text, /기준점/);
+  assert.doesNotMatch(n.floorBasis.text, /대부분의 판정/,
+    "실계수가 들어온 지금 1.0은 35개 중 8개다 — '대부분'이 아니다");
+  assert.doesNotMatch(n.floorBasis.text, /잠정값 상태라/,
+    "1층이 1.0인 원인은 잠정값이 아니라 설계다");
+});
+
+test("C1: 1층이 아닌데 score === baseScore면 그 층 계수가 1.0이라고 말한다", () => {
+  // BASE.floor === "F2". 실계수에서는 목적방문형/단독건물이 이 경우다.
   const n = templateNarration({ ...BASE, score: 59.4786, baseScore: 59.4786 });
-  assert.match(n.floorBasis.text, /영향도 주지 않았습니다/);
   assert.match(n.floorBasis.text, /계수가 1\.0/);
+  assert.match(n.floorBasis.text, /1층과 같게/);
+  assert.doesNotMatch(n.floorBasis.text, /기준점/, "기준점은 1층에만 쓰는 말이다");
 });
 
 test("C1: score !== baseScore면 '실제로 반영됐다'고 말하고 보정 배수를 보여준다", () => {

@@ -165,7 +165,7 @@ test("F7/M1: 대안 0건 + 전부 skipped → skipped 사실이 화면에 남는
 
 test("M1: 대안 0건 + 전부 층수 적합도 미달(skipped 0) → '판정 실패'가 아니라 '층 기준 미달'이라고 말한다", () => {
   // 이 갈래는 filterByFloor가 minCoefficient 미달로 조용히 뺀 경우다.
-  // 현재 배포된 층수 계수가 전부 1.0이라 실데이터로는 아직 안 밟히지만,
+  // 2026-08-09: 실계수가 들어와 이 갈래는 이제 실데이터로 밟힌다(3층이상).
   // recommend()의 알고리즘상 가능한 상태라 문구를 남겨둔다.
   const root = new FakeNode("section");
   renderResult(root, areaPayload({ alternatives: [], alternativesContext: { otherCount: 3, skippedCount: 0 } }));

@@ -201,3 +201,37 @@ test("실데이터: base가 null인 industry는 judge가 던진다", () => {
   assert.throws(() => judge({ entry, cuts, group: "유동의존형", floor: "F1",
                               floorTable: FLOOR_TABLE, warnBelow: 0.75 }));
 });
+
+// ── SB2(최종 리뷰): 순위는 층수를 빼고 자리만 본 값이어야 한다 ──────────
+//
+// cuts는 base_score 분포의 분위수다(scoring.py grade_cuts). 층수로 깎인 score를
+// 안 깎인 cuts에 대면 "서울 전역 순위"가 아니라 아무것도 아닌 값이 나온다.
+// 실측으로 잡힌 사례: 화곡역 4번/화장품은 base 88.9032로 서울 화장품 중 1등인데
+// (상위 컷 60.6034) 3층을 고르면 「하위 50%」로 표시됐다. 화면 문장이
+// 「서울 전역, 같은 업종」이라고 못박고 있으니 명백한 거짓이었다.
+
+test("SB2: rank는 층수 보정 전 base로 계산된다 — 층수가 순위를 바꾸면 안 된다", () => {
+  const entry = { base: 88.9032, patterns: [], patternsUnknown: [], poolSize: 200 };
+  const cuts = [60.6034, 45.0, 30.0];
+  const floorTable = { G: { B1: 0.6, F1: 1.0, F2: 0.7, F3P: 0.5, DETACHED: 0.85 } };
+
+  const ranks = FLOORS.map((floor) =>
+    judge({ entry, cuts, group: "G", floor, floorTable, warnBelow: 0.75 }).rank);
+
+  assert.deepEqual([...new Set(ranks)], ["상위 25% 이내"],
+    `층수가 순위를 바꿨다: ${JSON.stringify(ranks)} — 순위는 자리의 속성이지 층수의 속성이 아니다`);
+});
+
+test("SB2: 등급은 여전히 층수를 반영한다 — 순위와 등급이 갈릴 수 있고 그게 정상이다", () => {
+  const entry = { base: 88.9032, patterns: [], patternsUnknown: [], poolSize: 200 };
+  const cuts = [60.6034, 45.0, 30.0];
+  const floorTable = { G: { B1: 0.6, F1: 1.0, F2: 0.7, F3P: 0.5, DETACHED: 0.85 } };
+
+  const f1 = judge({ entry, cuts, group: "G", floor: "F1", floorTable, warnBelow: 0.75 });
+  const f3 = judge({ entry, cuts, group: "G", floor: "F3P", floorTable, warnBelow: 0.75 });
+
+  assert.equal(f1.grade, "상");
+  assert.equal(f3.grade, "중하", "3층은 계수 0.5라 등급이 내려가야 한다");
+  assert.equal(f3.rank, "상위 25% 이내",
+    "자리 자체는 서울 상위권이다 — 「자리는 좋은데 3층이라 중하」가 이 서비스가 해줘야 할 말이다");
+});

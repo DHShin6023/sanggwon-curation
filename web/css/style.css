@@ -5,7 +5,12 @@ body { margin:0; font:16px/1.7 -apple-system,BlinkMacSystemFont,"Apple SD Gothic
        color:var(--fg); background:var(--bg); }
 main { max-width:680px; margin:0 auto; padding:2rem 1.25rem 4rem; }
 h1 { font-size:1.5rem; margin:0 0 .25rem; }
-.tagline { color:var(--muted); font-size:.9rem; margin:0 0 2rem; }
+.tagline { color:var(--muted); font-size:.9rem; margin:0 0 .5rem; }
+/* I4(최종 리뷰): 서비스 범위(서울 전용)를 첫 화면에서 밝힌다. 이게 없으면
+   경기 주소를 넣은 사람이 「범위 밖입니다」만 보고 자기 주소가 특별히 안 되는
+   줄로 읽는다. */
+.scope-notice { font-size:.85rem; color:var(--muted); margin:0 0 2rem; }
+.scope-notice strong { color:var(--fg); }
 .provisional-notice { font-size:.8rem; color:var(--warn); background:#fffbeb; border:1px solid #fde68a;
                        border-radius:8px; padding:.6rem .8rem; margin:0 0 1.5rem; }
 form { display:grid; gap:1rem; margin-bottom:2rem; }
@@ -24,13 +29,9 @@ button { padding:.85rem; border:0; border-radius:8px; background:var(--fg); colo
 .dong-fact { font-size:.9rem; margin:.5rem 0 0; }
 .area-type { font-size:.8rem; color:var(--muted); margin:.35rem 0 0; }
 .rank { color:var(--muted); margin:0 0 1.5rem; }
-/* AI 해설(Task 12). 이 페이지에서 유일하게 생성모델이 쓴 문단이라, 규칙으로
-   계산된 나머지와 시각적으로 구분되게 둔다. AI가 없거나 검증에 걸리면 이
-   블록 자체가 렌더되지 않는다. */
-.ai-narration { margin:0 0 1.5rem; padding:1rem; background:#f7f8fa;
-                border:1px solid var(--line); border-radius:8px; }
-.ai-narration p { margin:0; }
-.ai-narration-note { margin:.6rem 0 0 !important; font-size:.75rem; color:var(--muted); }
+/* 2026-08-09: .ai-narration / .ai-narration-note 규칙을 삭제했다. AI 해설
+   경로를 걷어내면서 그 클래스를 내보내는 코드가 사라졌다 — 남겨두면 "이
+   페이지에는 생성모델이 쓴 문단이 있다"고 말하는 죽은 CSS가 된다. */
 .factors { list-style:none; padding:0; display:grid; gap:.5rem; }
 .factor.positive { color:var(--pos); }
 .factor.negative { color:var(--neg); }
