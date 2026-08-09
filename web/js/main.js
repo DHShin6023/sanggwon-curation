@@ -39,6 +39,10 @@ import { renderResult } from "./render.js";
 
 const PROXY = "https://sanggwon-proxy.<계정>.workers.dev";  // Task 12에서 실제 주소로 교체
 
+// I2: 업종매핑은 사용자가 대기하는 임계 경로 위에 있어 짧게, 해설은
+// 판정이 이미 화면에 나온 뒤 덧붙는 문장이라 조금 길게 잡는다.
+const MAP_INDUSTRY_TIMEOUT_MS = 3000;
+
 const cache = new Map();
 const loadJson = async (path) => {
   if (!cache.has(path)) cache.set(path, fetch(path).then((r) => (r.ok ? r.json() : null)));
@@ -120,8 +124,8 @@ if (meta) {
 }
 
 // 업종 매핑(AI 입구). 로컬 매칭을 먼저 전부 시도하고, 거기서 못 찾았을 때만
-// AI를 부른다 — OpenRouter 무료 티어가 하루 50건이라 로컬로 끝낼 수 있는
-// 입력에 할당량을 쓰면 안 된다(개정 (라)).
+// AI를 부른다 — OpenRouter는 유료 크레딧 키라 호출 1건이 곧 지출이다.
+// 로컬로 끝낼 수 있는 입력에 크레딧을 쓰면 안 된다(개정 (라)).
 //
 // 정확히 일치하면 그걸 우선한다 — datalist가 실제 업종명을 보여주므로
 // 대부분의 정상 입력은 여기서 끝난다. 아주 짧은 입력(길이<2)은 부분일치를
@@ -142,13 +146,22 @@ async function mapIndustry(text) {
   const local = mapIndustryLocal(q);
   if (local) return local;
 
-  // AI 폴백. 실패(미배포·네트워크·한도 초과)는 조용히 삼키고 null로 떨어져
-  // 호출부가 "목록에서 선택해 주세요"를 띄운다(스펙 10.2 입구 폴백).
+  // AI 폴백. 실패(미배포·네트워크·타임아웃·한도 초과)는 조용히 삼키고 null로
+  // 떨어져 호출부가 "목록에서 선택해 주세요"를 띄운다(스펙 10.2 입구 폴백).
   // 워커는 한도 초과 시 429가 아니라 200 {code: null}로 답한다(개정 (나)3).
+  //
+  // I2: 브라우저 fetch에는 기본 타임아웃이 없다. 타임아웃이 없으면 프록시가
+  // 멈췄을 때 analyze()가 화면 변화 없이 그대로 매달리고, 설계된 폴백은
+  // 영영 뜨지 않는다 — "조용히 삼킨다"가 아니라 "조용히 멈춘다"가 된다.
+  // 이 호출은 사용자가 대기하는 임계 경로 위에 있고 응답도 16토큰짜리라
+  // 짧게 잡는다.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MAP_INDUSTRY_TIMEOUT_MS);
   try {
     const res = await fetch(`${PROXY}/map-industry`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: q, candidates: meta.industries }),
+      signal: controller.signal,
     });
     if (!res.ok) return null;
     const { code } = await res.json();
@@ -157,6 +170,8 @@ async function mapIndustry(text) {
     return meta.industries.find((i) => i.code === code) ?? null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

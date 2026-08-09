@@ -5,20 +5,45 @@
 //
 // ⚠️ 2026-08-09 개정 (나) — 프록시 남용 방지.
 // CORS는 브라우저만 막고 curl은 못 막는다. workers.dev 주소가 알려지면
-// 카카오·OpenRouter 무료 할당량을 남이 태울 수 있고, OpenRouter 무료 티어는
-// 하루 50건이라 한 명만 긁어도 그날 서비스가 죽는다. 그래서 Origin 검사 +
-// KV 일 한도 두 겹을 둔다.
+// 남이 이 프록시로 카카오 할당량을 태우고 OpenRouter 크레딧을 대신 쓰게 할 수
+// 있다. OpenRouter는 선불 크레딧을 쓰는 유료 키이므로(2026-08-09 결정) 남용의
+// 결과는 "서비스 정지"가 아니라 "청구"다. 그래서 Origin 검사 + KV 일 한도
+// 두 겹을 둔다.
 
 const ALLOWED_ORIGINS = ["https://dhshin6023.github.io", "http://localhost:8080"];
 
 // AI 엔드포인트 전용 일 한도. /geocode는 여기 걸리지 않는다 — 아래 aiBudget()
 // 주석에 이유를 적었다.
+//
+// M5: OpenRouter는 유료(크레딧) 키를 쓴다. 따라서 이 전역 한도는 무료 할당량
+// 보호 장치가 아니라 **지출 상한**이다 — 하루 최대 AI 호출 수가 곧 하루 최대
+// 지출이다. 적정값은 모델 단가에 달렸으므로 코드가 정하지 않고 env로 뺀다
+// (기본 100은 출발점일 뿐이다). 자세한 건 README.
 const IP_DAILY_LIMIT = 30;
-const GLOBAL_DAILY_LIMIT = 400;
+const DEFAULT_GLOBAL_DAILY_LIMIT = 100;
 const COUNTER_TTL_SECONDS = 60 * 60 * 48;   // 이틀. 날짜 키가 영원히 쌓이지 않게.
 
+// 업스트림 타임아웃(I2). 브라우저 fetch에도 워커 fetch에도 기본 타임아웃이
+// 없다 — 없으면 업스트림이 멈출 때 "조용히 폴백"이 아니라 "조용히 멈춤"이 된다.
+const KAKAO_TIMEOUT_MS = 5000;
+// ⚠️ 이 값은 **브라우저 쪽 /narrate 타임아웃(narrate.js의 timeoutMs, 4000ms)보다
+// 반드시 작아야 한다.** 크면 브라우저가 먼저 포기한 뒤에도 워커는 계속 기다려
+// OpenRouter 호출을 끝내고, 그 크레딧은 나가지만 문장은 아무도 못 받는다 —
+// 클라이언트가 이미 버렸으니 캐시에도 안 남아 같은 질문에 다음에 또 지불한다.
+// 유료 키에서는 이게 그대로 반복 지출이다. 1초는 워커 자체 오버헤드(KV 읽기·
+// 쓰기, JSON 처리) 몫으로 남긴 여유다.
+const MODEL_TIMEOUT_MS = 3000;
+
+// M6: 일 한도 키는 KST 기준이다. 서울 전용 서비스인데 UTC를 쓰면 한도가
+// 09:00 KST에 리셋된다 — 하필 개점 준비 시간대 한복판이다.
+const seoulDate = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
 // 개정 (다): 기본값은 2024년 프리뷰 모델이라 지금 살아 있다고 가정하지 않는다.
-// 배포 시 OpenRouter에서 현행 무료 모델을 확인해 env.MODEL로 지정할 것(README).
+// 2026-08-09 신동환 결정으로 **유료(크레딧) 키를 쓰므로 이 :free 기본값은
+// 의도한 설정이 아니다** — 지정을 빠뜨렸을 때 조용히 템플릿으로 떨어지게 두는
+// 안전판일 뿐이다. 배포 시 OpenRouter 대시보드에서 쓸 모델의 정확한 id를 확인해
+// env.MODEL로 반드시 지정할 것(README). 여기에 특정 id를 미리 적지 않는 이유는
+// 그게 이 코드가 확인할 수 없는 사실이기 때문이다.
 // 모델이 죽어 있으면 askModel()이 null을 반환하고 프론트가 템플릿으로 떨어진다.
 const DEFAULT_MODEL = "google/gemini-2.0-flash-exp:free";
 
@@ -46,7 +71,10 @@ const json = (body, origin, status = 200) =>
 const kakao = (env, path, params) => {
   const url = new URL(`https://dapi.kakao.com${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  return fetch(url, { headers: { Authorization: `KakaoAK ${env.KAKAO_REST_KEY}` } });
+  return fetch(url, {
+    headers: { Authorization: `KakaoAK ${env.KAKAO_REST_KEY}` },
+    signal: AbortSignal.timeout(KAKAO_TIMEOUT_MS),
+  });
 };
 
 const firstDocument = async (res) => (res.ok ? (await res.json()).documents?.[0] ?? null : null);
@@ -90,7 +118,7 @@ async function geocode(query, env, origin) {
 //     안 나온다.
 //  2. Cloudflare 무료 KV는 쓰기 1,000건/일이다. 세 엔드포인트를 전부 세면
 //     분석 1건당 3~6회를 써서 한도 장치가 보호 대상보다 먼저 죽는다.
-//     실제로 희소한 자원은 OpenRouter(무료 50 RPD)지 카카오(10만/일)가 아니다.
+//     비싼 쪽은 건당 크레딧이 나가는 OpenRouter지 카카오(10만/일 무료)가 아니다.
 //
 // 반환값: 한도 안이면 "실제로 모델을 부른 뒤 호출할 카운터 증가 함수",
 // 한도 초과·KV 오류·미바인딩이면 null(= AI를 건너뛴다).
@@ -103,7 +131,7 @@ async function aiBudget(request, env) {
   if (!kv) return null;   // 미바인딩이면 비싼 쪽을 닫는다(개정 (나)5)
 
   const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
-  const day = new Date().toISOString().slice(0, 10);
+  const day = seoulDate();
   const ipKey = `rate:${ip}:${day}`;
   const globalKey = `rate:global:${day}`;
 
@@ -111,8 +139,9 @@ async function aiBudget(request, env) {
     const [ipRaw, globalRaw] = await Promise.all([kv.get(ipKey), kv.get(globalKey)]);
     const ipCount = Number(ipRaw) || 0;
     const globalCount = Number(globalRaw) || 0;
+    const globalLimit = Number(env.GLOBAL_DAILY_LIMIT) || DEFAULT_GLOBAL_DAILY_LIMIT;
     // 개정 (나)4: 초과 시에는 읽기만 하고 쓰지 않는다.
-    if (ipCount >= IP_DAILY_LIMIT || globalCount >= GLOBAL_DAILY_LIMIT) return null;
+    if (ipCount >= IP_DAILY_LIMIT || globalCount >= globalLimit) return null;
 
     return async () => {
       await Promise.all([
@@ -125,18 +154,40 @@ async function aiBudget(request, env) {
   }
 }
 
+// 반환은 {called, text}다. M4: "업스트림을 실제로 소비했는가"(called)와
+// "쓸 만한 문장이 나왔는가"(text)는 다른 사실이고, 한도를 깎을지는 앞의 것으로
+// 정해야 한다. 둘을 뭉뚱그려 null 하나로 돌려주던 예전 버전은 MODEL이 틀렸을 때
+// 하루치 예산과 KV 쓰기를 아무 산출 없이 통째로 태웠다((다) 시나리오).
 async function askModel(env, system, user, maxTokens) {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.OPENROUTER_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model: env.MODEL ?? DEFAULT_MODEL,
-      max_tokens: maxTokens,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }],
-    }),
-  });
-  if (!res.ok) return null;   // 모델 사망·인증 실패 전부 여기 — 프론트가 템플릿으로 떨어진다
-  return (await res.json()).choices?.[0]?.message?.content?.trim() ?? null;
+  let res;
+  try {
+    res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.OPENROUTER_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: env.MODEL ?? DEFAULT_MODEL,
+        max_tokens: maxTokens,
+        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      }),
+      signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+    });
+  } catch (error) {
+    // 네트워크 실패·타임아웃 abort. 예전엔 여기서 던진 예외가 바깥 try까지
+    // 올라가 500이 나갔고, 프론트는 그걸 폴백이 아니라 오류로 받았다.
+    console.error("askModel 업스트림 실패:", error);
+    return { called: false, text: null };
+  }
+  // 모델 사망·인증 실패 전부 여기 — 프론트가 템플릿으로 떨어진다.
+  if (!res.ok) return { called: false, text: null };
+
+  try {
+    const content = (await res.json()).choices?.[0]?.message?.content?.trim();
+    // 200을 받았으면 업스트림은 실제로 소비했다 — 내용이 비어도 센다.
+    return { called: true, text: content || null };
+  } catch (error) {
+    console.error("askModel 응답 파싱 실패:", error);
+    return { called: true, text: null };
+  }
 }
 
 // 입구: 자유 입력 업종 → 표준 코드. 확신이 없으면 null을 반환하고 프론트가 목록 선택으로 폴백한다.
@@ -145,11 +196,11 @@ async function mapIndustry(body, env, origin, spend) {
 
   const candidates = body.candidates ?? [];
   const list = candidates.map((c) => `${c.code}:${c.name}`).join("\n");
-  const text = await askModel(env,
+  const { called, text } = await askModel(env,
     "너는 업종 분류기다. 주어진 목록에서 가장 가까운 코드 하나만 출력한다. " +
     "확실하지 않으면 정확히 NONE 이라고만 출력한다. 다른 말은 하지 않는다.",
     `입력: ${body.text}\n\n목록:\n${list}`, 16);
-  await spend();
+  if (called) await spend();   // M4: 부르지도 못한 호출로 한도를 깎지 않는다
 
   // 모델이 목록에 없는 코드를 지어낼 수 있다 — 후보에 실재하는 코드만 통과시킨다.
   const code = text && text !== "NONE"
@@ -167,14 +218,15 @@ async function mapIndustry(body, env, origin, spend) {
 async function narrate(body, env, origin, spend) {
   if (!spend) return json({ text: null }, origin);   // 한도 초과·KV 사고(개정 (나)3)
 
-  const text = await askModel(env,
+  const { called, text } = await askModel(env,
     "너는 상권분석 결과를 설명하는 조력자다. 다음 규칙을 반드시 지킨다.\n" +
     "1. 주어진 등급과 수치를 바꾸거나 재해석하지 않는다.\n" +
-    "2. 성공 확률을 %로 말하지 않는다.\n" +
+    "2. %, 퍼센트, 확률이라는 표현을 일절 쓰지 않는다. 성공 가능성을 수치로 말하지 않고, " +
+    "순위는 주어진 payload의 표현(예: 상위 절반 이내)을 그대로 쓴다.\n" +
     "3. 주어진 데이터에 없는 사실을 지어내지 않는다.\n" +
     "4. 3~5문장, 존댓말, 창업 선배가 말하듯 담백하게.",
     JSON.stringify(body.payload), 400);
-  await spend();
+  if (called) await spend();   // M4: 부르지도 못한 호출로 한도를 깎지 않는다
 
   return json({ text }, origin);
 }

@@ -45,3 +45,29 @@ test("index.html에는 datalist#industry-options와 p#provisional-notice가 있�
   assert.ok(defined.has("industry-options"));
   assert.ok(defined.has("provisional-notice"));
 });
+
+// ── 타임아웃 예산 계약 ──────────────────────────────────────────────
+//
+// 워커→OpenRouter 타임아웃이 브라우저→/narrate 타임아웃보다 **작아야** 한다.
+// 크면 브라우저가 먼저 포기한 뒤에도 워커가 호출을 끝내서 크레딧은 나가고
+// 문장은 아무도 못 받는다 — 캐시에도 안 남으니 같은 질문에 다음에 또 지불한다.
+// 실제로 그 상태로 구현돼 있었다(워커 10초 > 브라우저 4초).
+//
+// 두 값이 서로 다른 파일에 상수로 박혀 있어서, 한쪽만 만져도 아무 테스트도
+// 깨지지 않고 조용히 역전된다. 위 id 계약과 같은 이유로 소스를 직접 읽어 잡는다.
+const narrateSrc = fs.readFileSync(fileURLToPath(new URL("js/narrate.js", root)), "utf8");
+const workerSrc = fs.readFileSync(
+  fileURLToPath(new URL("../worker/src/index.js", root)), "utf8");
+
+function num(src, re, label) {
+  const m = src.match(re);
+  assert.ok(m, `${label}을(를) 소스에서 못 찾았다 — 상수 이름이 바뀌었으면 이 정규식도 고칠 것`);
+  return Number(m[1]);
+}
+
+test("워커→OpenRouter 타임아웃은 브라우저→/narrate 타임아웃보다 짧아야 한다", () => {
+  const browser = num(narrateSrc, /timeoutMs\s*=\s*(\d+)/, "narrate.js의 timeoutMs 기본값");
+  const worker = num(workerSrc, /MODEL_TIMEOUT_MS\s*=\s*(\d+)/, "worker의 MODEL_TIMEOUT_MS");
+  assert.ok(worker < browser,
+    `워커(${worker}ms)가 브라우저(${browser}ms)보다 오래 기다리면 받지도 못할 응답에 크레딧을 쓴다`);
+});

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aiNarration, cacheKey, validateNarration } from "../js/narrate.js";
+import fs from "node:fs";
+import { aiNarration, aiPayload, cacheKey, validateNarration } from "../js/narrate.js";
+import { judge, rankLabel } from "../js/verdict.js";
 
 const RESULT = { industryName: "커피-음료", areaName: "서교동", floor: "F2",
                  grade: "중하", axes: { footfall: 92, competition: 18 }, patterns: [] };
@@ -211,11 +213,64 @@ test("aiNarration: localStorage에 남아 있던 검증 미통과 문장은 쓰�
   // localStorage는 배포를 건너 살아남는다 — 검증 규칙이 바뀌기 전에 저장된
   // 문장이 그대로 화면에 올라가면 검증을 넣은 의미가 없다. 읽을 때도 본다.
   const result = { ...V, areaName: "묵은캐시동" };
-  const store = new Map([[`narr:${cacheKey(result)}`, BAD_GRADE_TEXT]]);
+  const key = `narr:${cacheKey(result)}`;
+  const store = new Map([[key, BAD_GRADE_TEXT]]);
   globalThis.window = {};
   globalThis.localStorage = {
     getItem: (k) => (store.has(k) ? store.get(k) : null),
     setItem: (k, v) => store.set(k, v),
+    removeItem: (k) => store.delete(k),
+  };
+  try {
+    stubNarrateFetch(OK_TEXT);
+    assert.equal(await aiNarration(result, { endpoint: ENDPOINT }), OK_TEXT);
+    assert.equal(store.get(key), OK_TEXT,
+      "재검증에 떨어진 묵은 문장은 새로 통과한 문장으로 대체돼야 한다");
+  } finally {
+    delete globalThis.window;
+    delete globalThis.localStorage;
+  }
+});
+
+test("M3: 재검증에 떨어진 localStorage 항목은 즉시 지워진다", async () => {
+  // 안 지우면 그 (상권·업종·층수·등급) 조합은 매번 읽히고 매번 거부돼 영영
+  // 캐시 적중 없이 모델을 다시 부른다 — 유료 키에서는 그대로 반복 지출이다.
+  // 위 테스트와 달리 이번 호출은 모델도 실패시켜, 지우는 동작이 "새 문장으로
+  // 덮어써서" 지워진 것처럼 보이는 게 아님을 분리해 확인한다.
+  const result = { ...V, areaName: "묵은캐시삭제동" };
+  const key = `narr:${cacheKey(result)}`;
+  const store = new Map([[key, BAD_GRADE_TEXT]]);
+  const removed = [];
+  globalThis.window = {};
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, v),
+    removeItem: (k) => { removed.push(k); store.delete(k); },
+  };
+  try {
+    stubNarrateFetch(BAD_GRADE_TEXT);   // 모델도 못 통과 → 덮어쓸 문장이 없다
+    assert.equal(await aiNarration(result, { endpoint: ENDPOINT }), null);
+    assert.deepEqual(removed, [key], "미통과 항목에 removeItem이 불려야 한다");
+    assert.equal(store.has(key), false, "미통과 항목이 그대로 남으면 안 된다");
+  } finally {
+    delete globalThis.window;
+    delete globalThis.localStorage;
+  }
+});
+
+test("storage가 막힌 환경에서도 검증을 통과한 문장은 버려지지 않는다", async () => {
+  // 사파리 프라이빗 모드는 setItem에서 QuotaExceededError를 던지고, 이 캐시는
+  // 비우는 코드가 없어 오래 쓰면 한도에 닿는다. 그때 반환값까지 null로
+  // 떨어지면 **이미 크레딧을 치르고 받아 검증까지 통과한 문장**이 버려진다.
+  // removeItem이 없는 구형 storage도 같은 자리에서 TypeError를 낸다.
+  // (이 테스트를 쓰다가 발견한 결함이다 — 리뷰 지적 M3와는 별건.)
+  const result = { ...V, areaName: "구형스토리지동" };
+  const store = new Map([[`narr:${cacheKey(result)}`, BAD_GRADE_TEXT]]);
+  globalThis.window = {};
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: () => { throw new Error("QuotaExceededError"); },
+    // removeItem 없음 — 호출하면 TypeError
   };
   try {
     stubNarrateFetch(OK_TEXT);
@@ -223,5 +278,122 @@ test("aiNarration: localStorage에 남아 있던 검증 미통과 문장은 쓰�
   } finally {
     delete globalThis.window;
     delete globalThis.localStorage;
+  }
+});
+
+// ---------------------------------------------------------------------
+// I1(리뷰 1라운드): 우리가 모델에게 %가 든 payload를 주고서, %가 든 출력을
+// 거부하고 있었다. rankLabel()의 네 갈래가 전부 "상위 25% 이내"처럼 %를
+// 담고 있고 그게 judge() → narrationInput → 워커로 그대로 갔다. 결과적으로
+// **payload를 정확히 인용한 문장은 거부되고 아무 수치도 안 대는 모호한
+// 문장만 통과**했다 — 인센티브가 정확히 거꾸로였다.
+//
+// 이게 배포될 뻔한 이유는 위 V 픽스처에 rank가 없어서 validateNarration이
+// 현실적인 payload로는 한 번도 돌아본 적이 없었기 때문이다. 그래서 여기서는
+// 실데이터로 judge()를 실제로 돌려 그 반환을 픽스처로 쓴다.
+// ---------------------------------------------------------------------
+
+const REAL = (() => {
+  const meta = JSON.parse(fs.readFileSync(new URL("../data/meta.json", import.meta.url), "utf8"));
+  const scores = JSON.parse(fs.readFileSync(new URL("../data/score/11110.json", import.meta.url), "utf8"));
+  const area = scores.areas["3110008"];            // 배화여자대학교(박노수미술관)
+  const entry = area.industries.CS100001;          // 한식음식점
+  const verdict = judge({
+    entry,
+    cuts: meta.grade_cuts.CS100001,
+    group: Object.fromEntries(meta.industries.map((i) => [i.code, i.group])).CS100001,
+    floor: "F2",
+    floorTable: meta.floor_config.coefficients,
+    warnBelow: meta.floor_config.warn_below,
+  });
+  return { ...verdict, industryName: "한식음식점", areaName: area.name, floor: "F2", baseScore: entry.base };
+})();
+
+test("I1(회귀의 근원): judge()의 실제 반환에는 %가 든 rank가 들어 있다", () => {
+  assert.match(REAL.rank, /%/, "이 전제가 깨지면 아래 테스트들의 의미가 달라진다");
+});
+
+test("I1: aiPayload는 payload에서 %를 걷어내되 rank의 정보는 남긴다", () => {
+  const payload = aiPayload(REAL);
+  assert.doesNotMatch(JSON.stringify(payload), /%|퍼센트|확률/);
+  assert.ok(payload.rank, "rank를 그냥 지우면 AI 해설이 템플릿보다 빈약해진다");
+  assert.notEqual(payload.rank, REAL.rank);
+});
+
+test("I1: rankLabel이 낼 수 있는 네 갈래가 전부 %-없는 표현으로 옮겨진다", () => {
+  // rankLabel의 분기가 늘거나 문구가 바뀌면 여기서 잡힌다.
+  const cuts = [75, 50, 25];
+  const labels = [...new Set([90, 60, 30, 10].map((s) => rankLabel(s, cuts)))];
+  assert.equal(labels.length, 4, "rankLabel은 네 갈래라는 전제");
+  for (const rank of labels) {
+    const moved = aiPayload({ ...V, rank }).rank;
+    assert.ok(moved, `"${rank}"에 대응하는 %-없는 표현이 없다 — 매핑을 추가해야 한다`);
+    assert.doesNotMatch(moved, /%|퍼센트|확률/);
+  }
+});
+
+test("I1: rank 말고 다른 필드에 %가 섞여 들어와도 AI payload에서 빠진다", () => {
+  // 나중에 %를 담은 필드가 하나 더 생겨도 같은 사고가 반복되지 않게 한다.
+  const payload = aiPayload({ ...REAL, futureField: "상위 12% 수준" });
+  assert.doesNotMatch(JSON.stringify(payload), /%|퍼센트|확률/);
+});
+
+test("I1(핵심): payload를 정확히 인용한 문장이 검증을 통과한다", () => {
+  const payload = aiPayload(REAL);
+  const text =
+    `${payload.areaName}에서 한식음식점은 ${payload.rank}에 해당합니다. ` +
+    `이미 ${payload.storeCount}개가 영업 중이라 경쟁이 가볍지 않습니다. ` +
+    "임대료와 고정비를 먼저 계산해 보시길 권합니다.";
+  assert.equal(validateNarration(text, payload), text,
+    "payload를 정확히 인용한 문장이 거부되면 모호한 문장만 살아남는다");
+});
+
+test("I1: aiNarration이 워커로 보내는 payload에도 %가 없다", async () => {
+  let sent = null;
+  global.fetch = async (url, init) => {
+    sent = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ text: OK_TEXT }) };
+  };
+  await aiNarration({ ...REAL, areaName: "퍼센트제거동" }, { endpoint: ENDPOINT });
+  assert.ok(sent, "요청이 나갔어야 한다");
+  assert.doesNotMatch(JSON.stringify(sent), /%|퍼센트|확률/);
+});
+
+// ---------------------------------------------------------------------
+// M1(리뷰 1라운드): 따옴표·괄호로 감싼 등급이 규칙 3을 그대로 빠져나갔다.
+// 모델은 payload에서 등급을 문자열로 받으므로 인용부호를 붙여 쓰는 건
+// 오히려 자연스러운 출력 형태다.
+// ---------------------------------------------------------------------
+
+test("M1: 따옴표·괄호로 감싼 다른 등급도 거부한다", () => {
+  const quoted = [
+    "이 자리는 '상' 등급이라 지금 들어가셔도 충분히 해볼 만한 조건입니다.",
+    "이 자리는 「상」 등급이라 지금 들어가셔도 충분히 해볼 만한 조건입니다.",
+    'この자리는 "중상" 등급이라 지금 들어가셔도 충분히 해볼 만합니다. 준비만 잘하시면 됩니다.',
+    "이 자리는 (상) 등급이라 지금 들어가셔도 충분히 해볼 만한 조건입니다.",
+    "이 자리는 [중상] 등급이라 지금 들어가셔도 충분히 해볼 만한 조건입니다.",
+    "이 자리는 ‘상’ 등급이라 지금 들어가셔도 충분히 해볼 만한 조건입니다.",
+    "이 자리는 “중상” 등급이라 지금 들어가셔도 충분히 해볼 만한 조건입니다.",
+  ];
+  for (const text of quoted) {
+    assert.equal(validateNarration(text, V), null, `거부했어야 한다: ${text}`);
+  }
+});
+
+test("M1: 감싼 등급이 result.grade와 같으면 통과한다", () => {
+  const text = "종합하면 '중하' 등급인 자리입니다. 임대료를 낮추지 못하면 버티기 어려울 수 있습니다.";
+  assert.equal(validateNarration(text, V), text);
+});
+
+test("M1: 규칙을 넓힌 뒤에도 오탐 케이스는 전부 통과한다", () => {
+  const shouldPass = [
+    "이 상권은 유동인구가 많습니다. 다만 고정비를 먼저 계산해 보시길 권해 드립니다.",
+    "기대 이상 등급의 입지를 찾으시는 거라면 이 자리는 조금 아쉬울 수 있겠습니다.",
+    "이 자리를 최상 등급 입지라고 부르기는 어렵지만 준비에 따라 달라질 여지는 있습니다.",
+    "중상위 상권을 기준으로 보시면 이 자리는 조금 아래에 있다고 보시면 되겠습니다.",
+    "상황 등급을 따지기 전에 임대료부터 확인해 보시길 권해 드립니다. 그게 먼저입니다.",
+  ];
+  for (const text of shouldPass) {
+    assert.equal(validateNarration(text, V), text, `통과했어야 한다: ${text}`);
   }
 });

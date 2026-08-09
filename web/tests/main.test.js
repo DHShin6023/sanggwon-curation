@@ -424,3 +424,29 @@ test("개정 (바): 프록시 미배포 상태(모든 AI 호출 실패)에서도
   assert.ok(payload.narration.factors.length > 0);
   assert.equal(payload.narration.aiText, null);
 });
+
+test("I2: /map-industry가 응답하지 않아도 매달리지 않고 목록 선택 안내로 떨어진다",
+  { timeout: 10000 }, async () => {
+    installDom(ALL_IDS);
+    stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
+    const inner = global.fetch;
+    // 영원히 응답하지 않는 프록시. AbortSignal이 없으면 analyze()가 그대로
+    // 멈추고 "목록에서 선택해 주세요" 폴백은 영영 안 뜬다 — 조용히 삼키는
+    // 것과 조용히 멈추는 것은 다르다.
+    global.fetch = async (url, init) => {
+      if (String(url).includes("/map-industry")) {
+        return new Promise((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      }
+      return inner(url, init);
+    };
+
+    const { analyze } = await importMain();
+    const started = Date.now();
+    await assert.rejects(
+      () => analyze({ address: "아무 주소", industryText: "카페라떼 파는 곳", floor: "F2" }),
+      /업종을 인식하지 못했습니다/,
+    );
+    assert.ok(Date.now() - started < 8000, "타임아웃이 동작해야 한다");
+  });

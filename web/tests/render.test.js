@@ -354,6 +354,18 @@ test("Task 12: AI 해설에는 그 문단이 AI가 쓴 것이고 등급은 규�
   assert.match(note.textContent, /등급/);
 });
 
+test("M2: AI 고지는 AI 문단 안의 수치를 보증하지 않고, 어긋날 때 어느 쪽이 맞는지 밝힌다", () => {
+  // 이전 문구는 AI 문단 바로 밑에서 「등급과 근거 수치는 규칙으로 계산된
+  // 값입니다」라고 해, 그 문단 **안의** 수치를 우리가 보증한다고 읽혔다.
+  const root = new FakeNode("section");
+  renderResult(root, areaPayload({ narration: { ...NARRATION, aiText: AI_TEXT } }));
+  const note = root.query("ai-narration-note");
+  assert.match(note.textContent, /아래/,
+    "보증 대상이 AI 문단이 아니라 아래의 규칙 계산 값임을 가리켜야 한다");
+  assert.match(note.textContent, /다르게 말하면 아래 값이 맞습니다/,
+    "둘이 어긋날 때 규칙 쪽이 우선임을 밝혀야 한다");
+});
+
 test("Task 12: aiText가 없으면(AI 실패·미배포) 아무 흔적도 남기지 않는다", () => {
   const root = new FakeNode("section");
   renderResult(root, areaPayload()); // NARRATION에 aiText 없음

@@ -200,18 +200,79 @@ export function templateNarration(result) {
 }
 
 // ── AI 해설 (출구). 실패하면 조용히 null을 반환하고 호출부가 템플릿으로 떨어진다. ──
-// OpenRouter 무료 티어는 50 RPD로 공개 서비스에 턱없이 부족하다(스펙 9.2.3).
-// 따라서 캐싱은 선택이 아니라 필수다. 같은 (상권·업종·층수·등급)은 문장이 같아도 된다.
+// OpenRouter는 유료 크레딧 키를 쓴다(2026-08-09 결정). 호출 1건이 곧 지출이므로
+// 캐싱은 선택이 아니라 필수다. 같은 (상권·업종·층수·등급)은 문장이 같아도 된다.
 
 export function cacheKey(result) {
   return [result.areaName, result.industryName, result.floor, result.grade,
           (result.patterns ?? []).join("|")].join("::");
 }
 
+// ── AI에게 건네는 payload (입력 쪽 정리) ─────────────────────────────
+//
+// I1(리뷰 1라운드): 우리가 모델에게 %가 든 payload를 주고서 %가 든 출력을
+// 거부하고 있었다. rankLabel()의 네 갈래는 전부 "상위 25% 이내"처럼 %를 담고,
+// 그게 judge() → narrationInput → 워커로 그대로 갔다. 그 결과 **payload를
+// 정확히 인용한 문장일수록 거부되고, 아무 수치도 대지 않는 모호한 문장만
+// 통과**했다 — 인센티브가 정확히 거꾸로였고, 조용히 실패하는 설계라 아무
+// 신호도 남지 않았다.
+//
+// 고치는 방향은 "검증을 느슨하게"가 아니라 "입력에서 %를 걷어내기"다.
+// ⚠️ 화면에 나가는 값은 하나도 바뀌지 않는다 — rankLabel()도 render.js도
+// 그대로고, 이 변환은 **AI payload 전용**이다.
+const RANK_FOR_AI = {
+  "상위 25% 이내": "상위 4분의 1 이내",
+  "상위 50% 이내": "상위 절반 이내",
+  "하위 50%": "하위 절반",
+  "하위 25%": "하위 4분의 1",
+};
+
+const HAS_PERCENT = /%|퍼센트|확률/;
+
+// 중첩된 문자열까지 훑는다 — 나중에 %를 담은 필드가 하나 더 생겨도 같은
+// 사고가 조용히 반복되지 않게 하는 방어선이다(현재 실데이터에서 %를 담은
+// 필드는 rank 하나뿐임을 1,650개 상권·62개 업종으로 확인했다).
+function containsPercent(value, depth = 0) {
+  if (depth > 6) return false;
+  if (typeof value === "string") return HAS_PERCENT.test(value);
+  if (Array.isArray(value)) return value.some((v) => containsPercent(v, depth + 1));
+  if (value && typeof value === "object") {
+    return Object.values(value).some((v) => containsPercent(v, depth + 1));
+  }
+  return false;
+}
+
+export function aiPayload(result) {
+  const out = {};
+  for (const [key, value] of Object.entries(result ?? {})) {
+    if (key === "rank" && typeof value === "string") {
+      const moved = RANK_FOR_AI[value];
+      if (moved) { out.rank = moved; continue; }
+      // 모르는 표기다. %가 없으면 그대로 두고, 있으면 안전하게 옮길 방법이
+      // 없으므로 싣지 않는다 — 모델이 그걸 인용하는 순간 문장 전체가
+      // 거부되기 때문이다. 조용히 넘어가지 않고 개발자에게 신호를 남긴다.
+      if (!HAS_PERCENT.test(value)) out.rank = value;
+      else console.warn(`aiPayload: 모르는 rank 표기라 AI payload에서 뺐다 — "${value}" (RANK_FOR_AI에 매핑을 추가할 것)`);
+      continue;
+    }
+    if (containsPercent(value)) {
+      console.warn(`aiPayload: "${key}" 필드에 %/퍼센트/확률이 있어 AI payload에서 뺐다 — 이 필드도 %-없는 표현으로 옮길 것`);
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
 const MIN_LEN = 20;
 const MAX_LEN = 600;
 
-const GRADE_CLAIM = /(?<![가-힣])(중상|중하|상|하)\s*등급/g;
+// M1: 모델은 payload에서 등급을 문자열로 받으므로 '상' / 「상」 / "중상" /
+// (상) 처럼 인용부호나 괄호로 감싸 쓰는 게 오히려 자연스럽다. 감싼 형태가
+// 규칙 3을 통째로 빠져나가던 걸 막는다.
+const GRADE_QUOTE = `["'‘’“”「」『』()\\[\\]]`;
+const GRADE_CLAIM = new RegExp(
+  `(?<![가-힣])${GRADE_QUOTE}?\\s*(중상|중하|상|하)\\s*${GRADE_QUOTE}?\\s*등급`, "g");
 
 // 단위가 붙은 숫자만 본다. "억원"·"만원"을 "원"보다 앞에 둬야 잘리지 않는다.
 const NUMBER_WITH_UNIT = /([0-9][0-9,]*(?:\.[0-9]+)?)\s*(억원|만원|원|명|개|배)/g;
@@ -248,9 +309,14 @@ function collectNumbers(value, out = new Set(), depth = 0) {
 //   반대 방향의 오탐도 있다. payload에서 파생됐지만 그대로는 들어 있지 않은
 //   정당한 수(예: 점포수 차이, 계산된 배수)는 거부되어 템플릿으로 떨어진다 —
 //   틀린 문장을 보여주는 쪽보다 낫다고 보고 이 방향을 택했다.
-//   규칙 3(등급 모순)도 「X 등급」 형태만 본다. 「등급은 상입니다」처럼 어순이
-//   뒤집힌 형태는 못 잡는다 — 그 형태를 잡으려면 「등급은 상권 평균보다」류를
-//   오탐하게 되어, 오탐을 피하는 쪽을 택했다.
+//   규칙 3(등급 모순)은 「X 등급」 형태만 본다. 인용부호·괄호로 감싼 형태
+//   ('상' 등급 / 「상」 등급 / "중상" 등급 / (상) 등급)까지는 M1에서 넓혀
+//   잡지만, 아래는 여전히 못 잡는다:
+//     · 어순이 뒤집힌 형태 (「등급은 상입니다」) — 잡으려면 「등급은 상권
+//       평균보다」류를 오탐하게 되어 오탐을 피하는 쪽을 택했다
+//     · 「등급」이라는 낱말 없이 단정하는 형태 (「이 자리는 상입니다」)
+//     · 등급을 에둘러 말하는 형태 (「추천드립니다」, 「말리고 싶습니다」) —
+//       규칙 3은 낱말만 보고 뜻은 보지 않는다
 export function validateNarration(text, result) {
   if (typeof text !== "string") return null;
   const trimmed = text.trim();
@@ -311,12 +377,24 @@ export async function aiNarration(result, { endpoint, timeoutMs = 4000 } = {}) {
   const key = cacheKey(result);
   if (memory.has(key)) return memory.get(key);
 
+  // 모델에게 실제로 건네는 payload. 검증도 이 payload를 기준으로 한다 —
+  // 모델이 본 것과 우리가 대조하는 것이 달라지면 안 된다(I1).
+  const payload = aiPayload(result);
+
   const store = storage();
   // localStorage는 배포를 건너 살아남는다 — 검증 규칙이 생기거나 바뀌기 전에
   // 저장된 문장이 그대로 화면에 올라가면 검증을 넣은 의미가 없다. 읽을 때도
   // 다시 통과시킨다.
-  const stored = validateNarration(store?.getItem(`narr:${key}`), result);
+  const storageKey = `narr:${key}`;
+  const raw = store?.getItem(storageKey) ?? null;
+  const stored = validateNarration(raw, payload);
   if (stored) { memory.set(key, stored); return stored; }
+  // M3: 재검증에 떨어진 항목은 지운다. 안 지우면 규칙이 바뀐 뒤에도 그 자리에
+  // 남아 매번 읽히고 매번 거부돼, 그 (상권·업종·층수·등급) 조합은 영영 캐시
+  // 적중 없이 매번 모델을 부르게 된다 — 유료 키에서는 그대로 반복 지출이다.
+  if (raw !== null) {
+    try { store?.removeItem(storageKey); } catch { /* 용량·권한 문제는 무시 */ }
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -324,7 +402,7 @@ export async function aiNarration(result, { endpoint, timeoutMs = 4000 } = {}) {
     const res = await fetch(`${endpoint}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ payload: result }),
+      body: JSON.stringify({ payload }),
       signal: controller.signal,
     });
     if (!res.ok) return null;
@@ -332,10 +410,16 @@ export async function aiNarration(result, { endpoint, timeoutMs = 4000 } = {}) {
     // (개정 (나)3/(다)) — 여기서 새 분기를 만들지 않고 기존 폴백을 그대로 탄다.
     const { text } = await res.json();
     // 반환 직전에 반드시 검증한다. 캐시에는 통과한 문장만 넣는다(개정 (가)).
-    const valid = validateNarration(text, result);
+    const valid = validateNarration(text, payload);
     if (!valid) return null;
     memory.set(key, valid);
-    store?.setItem(`narr:${key}`, valid);
+    // 저장 실패가 문장을 죽이면 안 된다. 사파리 프라이빗 모드는 setItem에서
+    // QuotaExceededError를 던지고, 이 캐시는 비우는 코드가 없어 오래 쓰면
+    // 한도에 닿는다. 그런데 이 시점의 valid는 **이미 크레딧을 치르고 받아
+    // 검증까지 통과한 문장**이다 — 아래 catch로 흘려보내면 다음 화면에
+    // 폴백이 뜨고, 그 크레딧은 아무것도 못 산 게 된다. 캐싱은 부가 기능이므로
+    // 실패해도 반환은 그대로 한다.
+    try { store?.setItem(`narr:${key}`, valid); } catch { /* 캐시 못 써도 문장은 살린다 */ }
     return valid;
   } catch {
     return null;   // 네트워크·타임아웃·파싱 실패 전부 여기로. 사용자에게 노출하지 않는다.

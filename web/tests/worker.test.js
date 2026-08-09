@@ -14,7 +14,9 @@ import worker from "../../worker/src/index.js";
 
 const ORIGIN = "https://dhshin6023.github.io";
 const IP = "203.0.113.7";
-const TODAY = new Date().toISOString().slice(0, 10);
+// M6: 일 한도 키는 KST 기준이다(서울 전용 서비스). UTC를 쓰면 한도가
+// 09:00 KST에 리셋된다 — 장사 준비 시간대 한복판이다.
+const TODAY = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 function fakeKV(initial = {}) {
   const store = new Map(Object.entries(initial));
@@ -175,7 +177,7 @@ test("개정 (나)3/4: IP 일 한도를 넘으면 429가 아니라 200 {text: nu
 });
 
 test("개정 (나)3: 전역 일 한도를 넘으면 200 {text: null}이다", async () => {
-  const kv = fakeKV({ [`rate:global:${TODAY}`]: "400" });
+  const kv = fakeKV({ [`rate:global:${TODAY}`]: "100" });   // M5: 새 기본 한도
   const calls = stubUpstream({ "openrouter.ai": () => OPENROUTER_OK("아무 말") });
   const res = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
     { KAKAO_REST_KEY: "k", OPENROUTER_KEY: "o", RATE: kv });
@@ -262,4 +264,104 @@ test("업스트림이 예외를 던져도 500 응답 하나로 끝난다(내부 
   assert.equal(res.status, 500);
   const body = await res.json();
   assert.doesNotMatch(JSON.stringify(body), /유출된 내부 사정/);
+});
+
+// ── I1: 프롬프트도 %를 명시적으로 금지해야 한다 ──────────────────────
+
+test("I1: /narrate 시스템 프롬프트가 %·퍼센트·확률 표현을 명시적으로 금지한다", async () => {
+  // 예전 규칙 2는 "성공 확률을 %로 말하지 않는다"뿐이라 「상위 50% 이내」는
+  // 금지된 적조차 없었다. 클라이언트는 그걸 거부하는데 프롬프트는 허용하는
+  // 엇갈림이 I1의 절반이다.
+  const calls = stubUpstream({ "openrouter.ai": () => OPENROUTER_OK("해설") });
+  await worker.fetch(post("/narrate", { payload: { grade: "중하" } }), ENV());
+  const system = JSON.parse(calls[0].init.body).messages[0].content;
+  assert.match(system, /%/);
+  assert.match(system, /퍼센트/);
+  assert.match(system, /확률/);
+});
+
+// ── I2: 업스트림 타임아웃 ────────────────────────────────────────────
+
+test("I2: OpenRouter 호출에 타임아웃(AbortSignal)이 걸려 있다", async () => {
+  const calls = stubUpstream({ "openrouter.ai": () => OPENROUTER_OK("해설") });
+  await worker.fetch(post("/narrate", { payload: { grade: "중하" } }), ENV());
+  assert.ok(calls[0].init.signal instanceof AbortSignal,
+    "타임아웃이 없으면 업스트림이 멈출 때 워커 요청이 그대로 매달린다");
+});
+
+test("I2: 카카오 호출에도 타임아웃(AbortSignal)이 걸려 있다", async () => {
+  const calls = stubUpstream({ "search/address.json": () => jsonResponse(KAKAO_ADDRESS_OK) });
+  await worker.fetch(get("/geocode?q=서울 종로구 청운동 1"), ENV());
+  assert.ok(calls[0].init?.signal instanceof AbortSignal);
+});
+
+test("I2: OpenRouter가 아예 던져도 500이 아니라 {text: null}로 떨어진다", async () => {
+  // 타임아웃 abort도 여기로 온다. 예전엔 askModel의 예외가 바깥 try까지
+  // 올라가 500이 나갔고, 프론트는 그걸 폴백이 아니라 오류로 받았다.
+  global.fetch = async () => { throw new Error("연결 실패"); };
+  const res = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }), ENV());
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).text, null);
+});
+
+// ── M4: 업스트림이 실패했으면 한도를 소진하지 않는다 ──────────────────
+
+test("M4: 업스트림 호출 자체가 실패하면 카운터를 올리지 않는다", async () => {
+  // (다) 시나리오 — MODEL이 틀리면 하루치 예산과 KV 쓰기를 아무 산출 없이
+  // 통째로 태우게 된다.
+  const kv = fakeKV();
+  stubUpstream({ "openrouter.ai": () => jsonResponse({ error: "no such model" }, 404) });
+  const res = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+    { OPENROUTER_KEY: "o", RATE: kv });
+
+  assert.equal((await res.json()).text, null);
+  assert.equal(kv.puts.length, 0, "부르지도 못한 호출로 한도를 깎으면 안 된다");
+});
+
+test("M4: 호출은 성공했는데 내용이 비면 카운터를 올린다(업스트림을 실제로 썼다)", async () => {
+  const kv = fakeKV();
+  stubUpstream({ "openrouter.ai": () => jsonResponse({ choices: [{ message: { content: "" } }] }) });
+  const res = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+    { OPENROUTER_KEY: "o", RATE: kv });
+
+  assert.equal((await res.json()).text, null);
+  assert.equal(await kv.get(`rate:global:${TODAY}`), "1", "실제로 소비한 호출은 세야 한다");
+});
+
+// ── M5: 전역 한도는 env로 조절한다 ────────────────────────────────────
+
+test("M5: 전역 일 한도 기본값은 100이다", async () => {
+  const kv = fakeKV({ [`rate:global:${TODAY}`]: "99" });
+  stubUpstream({ "openrouter.ai": () => OPENROUTER_OK("해설") });
+  const allowed = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+    { OPENROUTER_KEY: "o", RATE: kv });
+  assert.equal((await allowed.json()).text, "해설", "99건째는 아직 한도 안이다");
+
+  const kv2 = fakeKV({ [`rate:global:${TODAY}`]: "100" });
+  const blocked = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+    { OPENROUTER_KEY: "o", RATE: kv2 });
+  assert.equal((await blocked.json()).text, null);
+});
+
+test("M5: env.GLOBAL_DAILY_LIMIT로 한도를 바꿀 수 있다(지출 상한)", async () => {
+  stubUpstream({ "openrouter.ai": () => OPENROUTER_OK("해설") });
+  const kv = fakeKV({ [`rate:global:${TODAY}`]: "5" });
+  const res = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+    { OPENROUTER_KEY: "o", RATE: kv, GLOBAL_DAILY_LIMIT: "5" });
+  assert.equal((await res.json()).text, null, "env로 내린 한도가 실제로 먹어야 한다");
+});
+
+// ── M6: 일 한도 키는 KST 기준 ────────────────────────────────────────
+
+test("M6: 날짜 키는 UTC가 아니라 KST 기준이다", async (t) => {
+  // UTC 2026-08-09T23:30Z = KST 2026-08-10 08:30. UTC 키를 쓰면 한도가
+  // 09:00 KST에 리셋된다.
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-08-09T23:30:00Z") });
+  const kv = fakeKV();
+  stubUpstream({ "openrouter.ai": () => OPENROUTER_OK("해설") });
+  await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+    { OPENROUTER_KEY: "o", RATE: kv });
+
+  assert.ok(kv.store.has("rate:global:2026-08-10"), `KST 날짜 키여야 한다 (실제 키: ${[...kv.store.keys()]})`);
+  assert.ok(!kv.store.has("rate:global:2026-08-09"));
 });
