@@ -126,6 +126,78 @@ test("/geocode: 끝내 행정동코드를 못 구하면 404다 — 빈 코드를
   assert.equal(body.gu_code, undefined, "찾지 못했는데 빈 문자열 코드를 실어 보내면 안 된다");
 });
 
+// ── 업스트림 설정 오류를 "주소 없음"으로 말하지 않는다 (2026-08-09 실배포) ──
+//
+// 실제로 밟은 경로다. 카카오 앱에서 카카오맵(로컬) 서비스가 꺼져 있으면
+// 주소검색이 403 {"errorType":"NotAuthorizedError","message":"App(상권 큐레이션)
+// disabled OPEN_MAP_AND_LOCAL service."} 를 준다. 예전 코드는 !res.ok를 전부
+// null로 삼켜서, 멀쩡히 존재하는 「서울 마포구 양화로 45」에 대해
+// 「주소를 찾지 못했습니다. 도로명 또는 지번으로 다시 입력해 주세요」를 띄웠다.
+//
+// 주소는 있고 우리 설정이 꺼져 있는 상황이다. 사용자가 주소를 백 번 고쳐 써도
+// 안 되는데 고쳐 쓰라고 말하는 것이고, 이 프로젝트가 계속 잡아온 결함
+// (데이터가 뒷받침하지 않는 문장)이 그대로 화면에 나간 사례다.
+
+test("카카오가 403(서비스 비활성)이면 404가 아니라 502다 — 주소 탓으로 돌리지 않는다", async () => {
+  stubUpstream({
+    "search/address.json": () => jsonResponse(
+      { errorType: "NotAuthorizedError", message: "App(상권 큐레이션) disabled OPEN_MAP_AND_LOCAL service." },
+      403),
+  });
+  const res = await worker.fetch(get("/geocode?q=서울 마포구 양화로 45"), ENV());
+  assert.equal(res.status, 502, "403을 404로 바꾸면 프론트가 「주소를 찾지 못했다」고 말한다");
+  const body = await res.json();
+  assert.doesNotMatch(body.error, /주소를 찾지 못했|다시 입력/,
+    "존재하는 주소를 못 찾았다고 하거나 다시 입력하라고 하면 안 된다");
+});
+
+test("카카오가 401(키 문제)이어도 502다", async () => {
+  stubUpstream({ "search/address.json": () => jsonResponse({ msg: "unauthorized" }, 401) });
+  const res = await worker.fetch(get("/geocode?q=서울 마포구 양화로 45"), ENV());
+  assert.equal(res.status, 502);
+});
+
+test("502 응답에 업스트림 내부 사정(앱 이름·errorType·키)이 새지 않는다", async () => {
+  stubUpstream({
+    "search/address.json": () => jsonResponse(
+      { errorType: "NotAuthorizedError", message: "App(상권 큐레이션) disabled OPEN_MAP_AND_LOCAL service." },
+      403),
+  });
+  const res = await worker.fetch(get("/geocode?q=서울 마포구 양화로 45"), ENV());
+  const raw = JSON.stringify(await res.json());
+  assert.doesNotMatch(raw, /NotAuthorizedError|OPEN_MAP_AND_LOCAL|KakaoAK|kakao-test/,
+    "업스트림 원문을 그대로 실어 보내면 안 된다");
+});
+
+test("카카오가 400(질의 자체가 이상)이면 502가 아니라 404다", async () => {
+  // 400은 우리 설정이 아니라 입력 문제다 — 이건 정말 「못 찾았다」가 맞고,
+  // 사용자가 주소를 고쳐 쓰면 해결된다. 401/403/5xx와 섞으면 안 된다.
+  stubUpstream({
+    "search/address.json": () => jsonResponse({ msg: "bad query" }, 400),
+    "search/keyword.json": () => jsonResponse({ msg: "bad query" }, 400),
+  });
+  const res = await worker.fetch(get("/geocode?q=@@@"), ENV());
+  assert.equal(res.status, 404);
+});
+
+test("카카오가 5xx(장애)면 502다 — 사용자에게 주소를 고치라고 하지 않는다", async () => {
+  stubUpstream({ "search/address.json": () => jsonResponse({ msg: "oops" }, 503) });
+  const res = await worker.fetch(get("/geocode?q=서울 마포구 양화로 45"), ENV());
+  assert.equal(res.status, 502);
+});
+
+test("좌표→행정동 조회가 403이어도 502다 (이 경로도 삼키면 안 된다)", async () => {
+  stubUpstream({
+    "search/address.json": () => jsonResponse({ documents: [] }),
+    "search/keyword.json": () => jsonResponse({
+      documents: [{ address_name: "서울 종로구 세종로", x: "126.9770", y: "37.5759" }],
+    }),
+    "coord2regioncode.json": () => jsonResponse({ errorType: "NotAuthorizedError" }, 403),
+  });
+  const res = await worker.fetch(get("/geocode?q=경복궁"), ENV());
+  assert.equal(res.status, 502);
+});
+
 test("알 수 없는 경로는 404다", async () => {
   stubUpstream({});
   const res = await worker.fetch(get("/없는경로"), ENV());

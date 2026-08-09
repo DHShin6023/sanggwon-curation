@@ -52,22 +52,66 @@ const kakao = (env, path, params) => {
   });
 };
 
-const firstDocument = async (res) => (res.ok ? (await res.json()).documents?.[0] ?? null : null);
+// ⚠️ 2026-08-09 실배포에서 밟은 결함. 예전 코드는 `res.ok ? … : null` 한 줄로
+// 카카오의 모든 실패를 「문서 없음」과 같은 것으로 뭉갰다. 그 결과:
+//
+//   카카오 앱에서 카카오맵(로컬) 서비스가 꺼져 있으면 403이 오는데
+//   → 화면은 「주소를 찾지 못했습니다. 도로명 또는 지번으로 다시 입력해 주세요」
+//
+// 주소는 멀쩡히 존재하고 우리 설정이 꺼져 있는 상황이다. 사용자는 주소를
+// 몇 번을 고쳐 써도 안 되는데 고쳐 쓰라는 말을 듣는다. 데이터가 뒷받침하지
+// 않는 문장을 화면에 내보내는 것 — 이 프로젝트가 계속 잡아온 그 결함이다.
+//
+// 그래서 「못 찾음」과 「부를 수 없음」을 갈라서 던진다.
+//  - 401/403 : 키·권한 설정 문제 (우리 잘못, 사용자가 할 수 있는 게 없다)
+//  - 5xx     : 카카오 장애 (기다리는 것 말고 할 게 없다)
+//  - 그 외    : 400 등 질의 자체의 문제 → 이건 정말 「못 찾음」이 맞다
+class UpstreamError extends Error {
+  constructor(status) {
+    super(`kakao upstream ${status}`);
+    this.name = "UpstreamError";
+    this.status = status;
+  }
+}
+
+// 이 로그가 원인 규명의 유일한 통로다. 삼키면 배포 후에 볼 수 있는 건
+// 「주소를 찾지 못했습니다」뿐이고, 그건 원인을 하나도 알려주지 않는다.
+// (실제로 이 로그 한 줄이 붙고 나서야 403/OPEN_MAP_AND_LOCAL이 보였다.)
+const upstreamFailed = async (res, label) => {
+  const body = await res.text();
+  console.error(`카카오 ${label} 실패 status=${res.status} body=${body.slice(0, 300)}`);
+  if (res.status === 401 || res.status === 403 || res.status >= 500) {
+    throw new UpstreamError(res.status);
+  }
+};
+
+const firstDocument = async (res, label) => {
+  if (!res.ok) {
+    await upstreamFailed(res, label);
+    return null;   // 400 등 — 질의 문제이므로 「못 찾음」으로 흘려보낸다
+  }
+  return (await res.json()).documents?.[0] ?? null;
+};
 
 // 키워드검색 결과에는 h_code가 없다 — 좌표로 한 번 더 물어서 행정동을 얻는다.
 async function hCodeFromCoords(env, x, y) {
   const res = await kakao(env, "/v2/local/geo/coord2regioncode.json", { x, y });
-  if (!res.ok) return null;
+  if (!res.ok) {
+    await upstreamFailed(res, "coord2regioncode");
+    return null;
+  }
   const docs = (await res.json()).documents ?? [];
   return docs.find((d) => d.region_type === "H")?.code ?? null;
 }
 
 async function geocode(query, env, origin) {
-  let doc = await firstDocument(await kakao(env, "/v2/local/search/address.json", { query }));
+  let doc = await firstDocument(
+    await kakao(env, "/v2/local/search/address.json", { query }), "주소검색");
   let hCode = doc?.address?.h_code ?? doc?.road_address?.h_code ?? null;
 
   if (!doc) {   // 도로명·지번 실패 시 키워드 검색으로 한 번 더
-    doc = await firstDocument(await kakao(env, "/v2/local/search/keyword.json", { query }));
+    doc = await firstDocument(
+      await kakao(env, "/v2/local/search/keyword.json", { query }), "키워드검색");
     hCode = null;
   }
   if (doc && !hCode) hCode = await hCodeFromCoords(env, doc.x, doc.y);
@@ -110,6 +154,15 @@ export default {
       }
       return json({ error: "not found" }, origin, 404);
     } catch (error) {
+      // 업스트림을 「부를 수 없었다」와 「불렀는데 결과가 없다」는 사용자가 할
+      // 일이 완전히 다르다. 전자에서 주소를 고쳐 쓰라고 하면 영원히 안 된다.
+      // 502 = 우리/카카오 쪽 사정이라는 뜻이고, 프론트는 이 메시지를 그대로 띄운다.
+      if (error?.name === "UpstreamError") {
+        console.error(`카카오를 호출하지 못했다 status=${error.status}`);
+        return json({
+          error: "주소 조회 서비스에 연결하지 못했습니다. 입력하신 주소 문제가 아니니 잠시 후 다시 시도해 주세요.",
+        }, origin, 502);
+      }
       // 내부 사정을 그대로 응답에 실으면(예전 `String(error)`) 업스트림 URL·키
       // 관련 문구가 밖으로 샐 수 있다. 자세한 건 로그로만 남긴다.
       console.error("worker 처리 실패:", error);

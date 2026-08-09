@@ -216,7 +216,23 @@ async function geocode(address) {
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) throw new Error("주소를 찾지 못했습니다. 도로명 또는 지번으로 다시 입력해 주세요.");
+  // ⚠️ 2026-08-09 실배포: 예전엔 !res.ok를 전부 「주소를 찾지 못했습니다.
+  // 도로명 또는 지번으로 다시 입력해 주세요」로 뭉갰다. 카카오맵 서비스가
+  // 꺼져 있어 워커가 502로 "주소 문제가 아니다"라고 말해주는데도 화면은
+  // 주소 탓을 했고, 사용자는 멀쩡한 주소를 계속 고쳐 쓰게 된다.
+  //
+  // 워커가 이유를 말해줬으면 그 문장을 그대로 쓴다. 404(정말 못 찾음)일 때만
+  // 주소를 고쳐 쓰라고 안내한다 — 그때는 그게 실제로 해결책이다.
+  if (!res.ok) {
+    let upstream = null;
+    try {
+      upstream = (await res.json())?.error ?? null;
+    } catch {
+      upstream = null;   // 본문이 없거나 JSON이 아닌 경우(구버전 워커 등)
+    }
+    if (res.status !== 404 && upstream) throw new Error(upstream);
+    throw new Error("주소를 찾지 못했습니다. 도로명 또는 지번으로 다시 입력해 주세요.");
+  }
   return res.json();   // { lng, lat, gu_code, dong_code }
 }
 

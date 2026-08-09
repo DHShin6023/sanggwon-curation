@@ -28,11 +28,20 @@ const ALL_IDS = ["data-period", "sources", "provisional-notice", "query", "resul
 // {ok:false} — 즉 "아직 배포 안 된 프록시"와 같은 상태이고, 그 상태에서도
 // 등급·근거가 나와야 한다(개정 (바)). proxyCalls로 호출 여부도 확인한다.
 function stubFetch({ metaOk = true, geocodeResponse, metaTransform,
-                     proxyCalls } = {}) {
+                     proxyCalls, geocodeError } = {}) {
   global.fetch = async (url) => {
     const u = String(url);
     if (u.startsWith("https://sanggwon-proxy")) {
       proxyCalls?.push(u);
+      // geocodeError: 워커가 상태코드 + {error} 본문으로 실패를 설명하는 경우.
+      // 예전 스텁은 {ok:false}뿐이라 "워커가 이유를 말해준 경우"를 표현할 수
+      // 없었고, 그래서 프론트가 그 이유를 버리는 것도 잡히지 않았다.
+      if (geocodeError) {
+        return {
+          ok: false, status: geocodeError.status,
+          json: async () => geocodeError.body,
+        };
+      }
       if (!geocodeResponse) return { ok: false };
       return { ok: true, json: async () => geocodeResponse };
     }
@@ -174,6 +183,59 @@ test("Task 12 이전: 프록시가 없으면 geocode 실패가 깨끗한 Error�
   await assert.rejects(
     () => analyze({ address: "서울 마포구 양화로 45", industryText: "커피", floor: "F1" }),
     /주소를 찾지 못했습니다/,
+  );
+});
+
+// ---------------------------------------------------------------------
+// 2026-08-09 실배포: 워커가 왜 실패했는지 말해주는데 프론트가 그걸 버렸다.
+//
+// 카카오맵 서비스가 꺼져 있어 워커가 502 + "입력하신 주소 문제가 아니니…"를
+// 보내는데도, 화면은 `!res.ok`를 뭉뚱그려 "주소를 찾지 못했습니다. 도로명
+// 또는 지번으로 다시 입력해 주세요"를 띄웠다. 사용자는 멀쩡한 주소를 계속
+// 고쳐 쓰게 된다 — 워커에서 고친 것과 같은 결함이 한 층 위에 또 있었다.
+// ---------------------------------------------------------------------
+
+test("워커가 502로 이유를 말해주면 그 문장을 그대로 띄운다(주소 탓으로 바꾸지 않는다)", async () => {
+  installDom(ALL_IDS);
+  stubFetch({
+    metaOk: true,
+    geocodeError: {
+      status: 502,
+      body: { error: "주소 조회 서비스에 연결하지 못했습니다. 입력하신 주소 문제가 아니니 잠시 후 다시 시도해 주세요." },
+    },
+  });
+  const { analyze } = await importMain();
+  await assert.rejects(
+    () => analyze({ address: "서울 마포구 양화로 45", industryText: "커피", floor: "F1" }),
+    (error) => {
+      assert.match(error.message, /연결하지 못했습니다/);
+      assert.doesNotMatch(error.message, /다시 입력해|도로명 또는 지번/,
+        "업스트림 장애를 주소 오타처럼 안내하면 사용자는 영원히 고쳐 쓰게 된다");
+      return true;
+    },
+  );
+});
+
+test("워커가 404로 '주소 없음'을 말하면 주소를 고쳐 쓰라는 안내가 맞다", async () => {
+  installDom(ALL_IDS);
+  stubFetch({
+    metaOk: true,
+    geocodeError: { status: 404, body: { error: "주소를 찾지 못했습니다" } },
+  });
+  const { analyze } = await importMain();
+  await assert.rejects(
+    () => analyze({ address: "없는주소", industryText: "커피", floor: "F1" }),
+    /주소를 찾지 못했습니다/,
+  );
+});
+
+test("워커 응답에 본문이 없어도(구버전 등) 깨지지 않고 안내가 나간다", async () => {
+  installDom(ALL_IDS);
+  stubFetch({ metaOk: true }); // {ok:false}만, status도 json도 없음
+  const { analyze } = await importMain();
+  await assert.rejects(
+    () => analyze({ address: "서울 마포구 양화로 45", industryText: "커피", floor: "F1" }),
+    /주소/,
   );
 });
 
