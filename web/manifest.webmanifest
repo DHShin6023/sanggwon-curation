@@ -1,0 +1,17 @@
+{
+  "name": "상권 큐레이션",
+  "short_name": "상권 큐레이션",
+  "description": "주소·층수·업종을 넣으면 그 조합의 적합도를 4단계로 판정하고 더 맞는 업종을 역제안합니다. 서울 전용.",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#0c1425",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

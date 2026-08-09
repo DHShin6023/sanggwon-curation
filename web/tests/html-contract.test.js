@@ -91,3 +91,57 @@ test("이 계약이 실제로 뭔가 보고 있는지 — 검사 대상 소스�
   assert.match(mainSrc, /loadJson\("data\/meta\.json"\)/,
     "meta.json을 상대경로로 읽는 지점이 사라졌다면 이 계약의 정규식도 확인할 것");
 });
+
+// ── 홈화면 아이콘 / PWA 계약 (2026-08-09) ────────────────────────────
+//
+// 아이콘 경로가 실제 파일과 어긋나면 **배포 후 홈화면에 빈 아이콘이 뜰 때**
+// 알게 된다. 화면은 멀쩡히 동작하므로 다른 테스트는 전부 초록이다.
+// manifest와 index.html이 가리키는 파일이 정말 존재하는지 여기서 고정한다.
+
+const manifestPath = fileURLToPath(new URL("manifest.webmanifest", root));
+
+test("manifest.webmanifest가 있고 파싱된다", () => {
+  const raw = fs.readFileSync(manifestPath, "utf8");
+  const m = JSON.parse(raw);
+  assert.equal(m.name, "상권 큐레이션");
+  assert.equal(m.display, "standalone");
+  // Pages 하위 경로 배포라 start_url/scope도 상대경로여야 한다.
+  assert.ok(!m.start_url.startsWith("/"), "start_url이 절대경로면 도메인 루트로 나간다");
+  assert.ok(!m.scope.startsWith("/"), "scope가 절대경로면 도메인 루트로 나간다");
+});
+
+test("manifest가 가리키는 아이콘 파일이 실제로 존재한다", () => {
+  const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.ok(m.icons.length >= 2);
+  for (const icon of m.icons) {
+    assert.ok(!icon.src.startsWith("/"), `${icon.src} 가 절대경로다`);
+    const p = fileURLToPath(new URL(icon.src, root));
+    assert.ok(fs.existsSync(p), `manifest가 가리키는 ${icon.src} 파일이 없다`);
+    assert.ok(fs.statSync(p).size > 500, `${icon.src} 가 비어 있다`);
+  }
+});
+
+test("안드로이드용 maskable 아이콘이 하나 있다", () => {
+  const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.ok(m.icons.some((i) => i.purpose === "maskable"),
+    "maskable이 없으면 안드로이드가 아이콘을 제멋대로 잘라 핀이 잘릴 수 있다");
+});
+
+test("index.html의 apple-touch-icon이 실제 파일을 가리킨다", () => {
+  const m = htmlSrc.match(/rel=["']apple-touch-icon["'][^>]*href=["']([^"']+)["']/);
+  assert.ok(m, "apple-touch-icon이 없으면 iOS가 화면을 캡처해 아이콘을 만든다");
+  assert.ok(fs.existsSync(fileURLToPath(new URL(m[1], root))), `${m[1]} 파일이 없다`);
+});
+
+test("index.html이 manifest를 연결하고 홈화면 이름을 지정한다", () => {
+  assert.match(htmlSrc, /rel=["']manifest["']/);
+  // iOS는 manifest의 name을 홈화면 이름으로 쓰지 않는다.
+  assert.match(htmlSrc, /apple-mobile-web-app-title["']\s+content=["']상권 큐레이션["']/);
+});
+
+test("theme-color가 manifest와 index.html에서 같은 값이다", () => {
+  const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const html = htmlSrc.match(/name=["']theme-color["']\s+content=["']([^"']+)["']/);
+  assert.ok(html, "theme-color가 없으면 standalone 모드 상태바 색이 제각각이 된다");
+  assert.equal(html[1], m.theme_color, "두 곳이 어긋나면 브라우저마다 다른 색이 나온다");
+});

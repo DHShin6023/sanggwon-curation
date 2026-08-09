@@ -5,6 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>상권 큐레이션</title>
 <link rel="stylesheet" href="css/style.css">
+
+<!-- 홈화면 추가 / PWA. 경로는 전부 **상대경로**여야 한다 — 사이트가
+     도메인 루트가 아니라 /sanggwon-curation/ 하위에 붙어 있어서
+     "/icons/..."로 쓰면 404가 난다(html-contract 테스트가 이걸 막는다).
+     아이콘 원본은 코드다: scripts/make_icons.py 를 고치고 다시 돌리면 된다. -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<meta name="theme-color" content="#0c1425">
+<!-- iOS는 manifest의 name을 홈화면 이름으로 쓰지 않는다 — 이 태그를 봐야 한다.
+     없으면 <title>이 쓰이는데 길면 잘린다. -->
+<meta name="apple-mobile-web-app-title" content="상권 큐레이션">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 </head>
 <body>
 <main>
