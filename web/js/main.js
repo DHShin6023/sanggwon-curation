@@ -37,7 +37,15 @@ import { recommend } from "./alternatives.js";
 import { templateNarration } from "./narrate.js";
 import { renderResult } from "./render.js";
 
-const PROXY = "https://sanggwon-proxy.<계정>.workers.dev";  // Task 12에서 실제 주소로 교체
+// 워커 주소. wrangler.toml의 name(sanggwon-proxy) + 계정 서브도메인으로 정해진다.
+// 서브도메인은 맛집 큐레이션 프록시(matzip-naver-proxy.dhshin6023.workers.dev)와
+// 같은 계정이라 이미 확정돼 있다.
+//
+// ⚠️ 아직 배포 전이면 이 주소는 응답하지 않고, geocode()가 「주소 조회에
+// 실패했습니다」를 띄운다. 지오코딩은 **폴백이 없는 유일한 경로**다 —
+// 좌표를 모르면 어느 상권인지 알 수 없고, 모르는 채로 등급을 지어낼 수는 없다.
+// 조용히 넘어가지 않고 화면에 보이는 게 맞다.
+const PROXY = "https://sanggwon-proxy.dhshin6023.workers.dev";
 
 // N7: /geocode에는 타임아웃이 아예 없었다. 이 호출이 멈추면 등급 자체가 안
 // 나오므로 **화면이 통째로 아무 변화 없이 선다**. 넉넉히 잡되 무한 대기만은 막는다.
