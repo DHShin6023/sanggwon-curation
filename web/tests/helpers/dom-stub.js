@@ -39,6 +39,9 @@ export class FakeNode {
   getAttribute(name) { return this._attrs.has(name) ? this._attrs.get(name) : null; }
   removeAttribute(name) { this._attrs.delete(name); }
   focus() { this._focused = true; }
+  // <form>.reset(). 「새로 입력」 버튼이 쓴다 — 실제 DOM은 각 입력의 값을
+  // 초기값으로 되돌리는데, 여기서는 setFormValues가 넣어둔 값만 비운다.
+  reset() { this._values = {}; }
 
   // 클래스 이름으로 서브트리를 훑는다(테스트 편의용 — 실제 DOM API는 아니다).
   queryAll(cls) {

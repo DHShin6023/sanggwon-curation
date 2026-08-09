@@ -23,7 +23,13 @@
 <body>
 <main>
   <header>
-    <h1>상권 큐레이션</h1>
+    <div class="header-row">
+      <h1>상권 큐레이션</h1>
+      <!-- 결과를 본 뒤 다른 물건지·업종을 바로 넣을 수 있게. 페이지를 새로
+           고치지 않고 화면만 비운다 — 새로고침하면 meta.json과 데이터
+           파일을 전부 다시 받아 느리다. -->
+      <button type="button" id="reset" class="reset">↻ 새로 입력</button>
+    </div>
     <p class="tagline">이 서비스는 결정해주지 않습니다. 현장에 나가기 전에 후보를 걸러줍니다.</p>
     <!-- I4(최종 리뷰): 화면 어디에도 "서울만 된다"는 말이 없어서, 경기 주소를
          넣으면 「범위 밖입니다」만 뜨고 사용자는 자기 주소가 특별히 안 되는
@@ -34,7 +40,7 @@
 
   <form id="query">
     <label>물건지 주소
-      <input name="address" required placeholder="예) 서울 마포구 양화로 45">
+      <input id="address" name="address" required placeholder="예) 서울 마포구 양화로 45">
     </label>
     <label>오픈하려는 업종
       <input name="industry" required list="industry-options"

@@ -386,3 +386,25 @@ form.addEventListener("submit", async (event) => {
   // index.html에서 tabindex="-1"로 프로그램적 포커스를 받을 수 있게 했다.
   if (typeof root.focus === "function") root.focus();
 });
+
+// 「새로 입력」 (2026-08-09 신동환 요청) — 결과를 본 뒤 다른 물건지·업종을
+// 바로 넣을 수 있게 한다. 이전 결과가 화면에 남아 있으면 새 입력과 옛 결과가
+// 한 화면에 섞여 어느 쪽인지 헷갈린다.
+//
+// 페이지를 새로고침(location.reload)하지 않는 이유: meta.json과 구별 데이터
+// 파일을 전부 다시 받아 느리고, 오프라인/네트워크 불안정에서 멀쩡히 떠 있던
+// 화면이 죽을 수 있다. 화면 상태만 되돌린다.
+//
+// 버튼이 없는 마크업(구버전 캐시 등)에서도 부트스트랩이 죽으면 안 되므로
+// 전부 옵셔널로 다룬다 — getElementById는 없는 id에 null을 돌려준다.
+const resetButton = document.getElementById("reset");
+const addressInput = document.getElementById("address");
+
+resetButton?.addEventListener("click", () => {
+  root.hidden = true;
+  root.replaceChildren();
+  if (typeof form.reset === "function") form.reset();
+  if (typeof addressInput?.focus === "function") addressInput.focus();
+  // 결과를 보느라 아래로 내려와 있으니 입력 칸이 보이는 위치로 되돌린다.
+  if (typeof globalThis.scrollTo === "function") globalThis.scrollTo({ top: 0, behavior: "smooth" });
+});

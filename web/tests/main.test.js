@@ -14,7 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { installDom, setFormValues } from "./helpers/dom-stub.js";
+import { installDom, setFormValues, FakeNode } from "./helpers/dom-stub.js";
 
 const WEB_ROOT = new URL("../", import.meta.url).pathname;
 const ALL_IDS = ["data-period", "sources", "provisional-notice", "query", "result", "industry-options"];
@@ -470,3 +470,44 @@ test("AI 제거 후: narration에 aiText 자리가 남아 있지 않다", async 
 
 // 2026-08-09: /map-industry 타임아웃 테스트는 삭제했다 — 그 엔드포인트가
 // 없어졌다. 별칭 사전은 네트워크를 타지 않으므로 매달릴 자리가 없다.
+
+// ---------------------------------------------------------------------
+// 2026-08-09 신동환 요청: 결과를 본 뒤 다른 물건지·업종을 바로 다시 넣을 수
+// 있어야 한다. 지금은 이전 결과가 화면에 남아 있어 새 입력과 옛 결과가
+// 한 화면에 섞인다 — 어느 쪽 결과인지 헷갈린다.
+// ---------------------------------------------------------------------
+
+test("새로 입력 버튼: 이전 결과가 화면에서 사라진다", async () => {
+  const els = installDom([...ALL_IDS, "reset", "address"]);
+  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
+  await importMain();
+
+  // 결과가 남아 있는 상태를 만든다
+  els.result.hidden = false;
+  els.result.append(new FakeNode("p"));
+  assert.ok(els.result.children.length > 0);
+
+  await els.reset.dispatchEvent("click", {});
+  assert.equal(els.result.children.length, 0, "이전 결과가 남으면 새 입력과 섞인다");
+  assert.equal(els.result.hidden, true);
+});
+
+test("새로 입력 버튼: 입력값이 비워지고 주소 칸에 포커스가 간다", async () => {
+  const els = installDom([...ALL_IDS, "reset", "address"]);
+  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
+  await importMain();
+
+  setFormValues(els.query, { address: "서울 마포구 양화로 45", industry: "카페", floor: "F1" });
+  await els.reset.dispatchEvent("click", {});
+
+  assert.deepEqual(els.query._values, {}, "폼이 비워져야 다음 물건지를 바로 넣는다");
+  assert.equal(els.address._focused, true, "포커스가 주소 칸에 있어야 바로 타이핑된다");
+});
+
+test("새로 입력 버튼이 없어도(구버전 마크업) 부트스트랩이 죽지 않는다", async () => {
+  const els = installDom(ALL_IDS);   // reset/address 없음
+  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
+  const { analyze } = await importMain();
+  assert.equal(typeof analyze, "function");
+  assert.ok(els.query._listeners.has("submit"), "submit 리스너는 그대로 붙어 있어야 한다");
+});
