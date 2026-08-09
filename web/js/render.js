@@ -224,11 +224,17 @@ export function renderResult(root, payload) {
         "대신 행정동 전체의 원자료를 참고로 보여드립니다(등급이 아닙니다).",
       ));
       if (dongInfo) {
+        // ⚠️ 2026-08-09: 예전엔 「총매출(월)」이었는데 **분기 값이다.**
+        // 원자료 검증: dong_sales의 요일별 매출 7개 컬럼 합계가 이 값과
+        // 정확히 일치한다 → 그 분기 전체 매출. 규모로도 확인된다(서울 전
+        // 상권 한식 합계 3.67조. 월이면 연 44조로 서울 외식업 전체를 넘는다).
+        // 필드명이 THSMON_SELNG_AMT("당월_매출_금액")이라 월로 읽히는 게
+        // 함정이다 — 이름을 믿고 붙인 라벨이 화면의 거짓이 됐다.
         const moneyText = money(dongInfo.salesTotal);
         head.append(el(
           "p", "dong-fact",
           moneyText
-            ? `${dongInfo.guName} 일대(행정동 ${dongInfo.dongCode})에서 ${industryName} 총매출(월)은 약 ${moneyText}입니다.`
+            ? `${dongInfo.guName} 일대(행정동 ${dongInfo.dongCode})의 ${industryName} 분기 총매출은 약 ${moneyText}입니다.`
             : `${dongInfo.guName} 일대(행정동 ${dongInfo.dongCode})에는 ${industryName} 매출 데이터가 없습니다.`,
         ));
       }
