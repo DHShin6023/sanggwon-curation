@@ -15,8 +15,12 @@ from etl.config import SEOUL_GU, WEB_DATA_DIR
 from etl.engine import axes, patterns, scoring
 from etl.geometry import boundary
 
+# 출처 표기는 라이선스 의무다. 서울시가 쓰는 이름 그대로 적는다 —
+# OA-15560 페이지 표기는 "공공누리 1유형 : 출처표시 (상업적 이용 및 변경 가능)"이고
+# 배지도 type01이다(2026-08-09 원문 확인). 예전엔 "CC BY"라고 적었는데, 조건은
+# 실질적으로 같아도 서울시가 그 이름을 쓰지 않는다.
 SOURCES = [
-    "서울 열린데이터광장 상권분석서비스 (CC BY)",
+    "서울 열린데이터광장 상권분석서비스 (공공누리 제1유형)",
     "카카오 로컬 API (주소 좌표 변환)",
 ]
 
