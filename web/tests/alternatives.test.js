@@ -197,20 +197,39 @@ test("recommend: minCoefficient가 없으면 조용히 기본값을 쓰지 않�
 });
 
 // --- 정직성: 위 테스트들은 전부 합성 픽스처(층별로 다른 계수)로 검증했다.
-// 출하된 실제 도메인 자산은 아직 잠정값이라 층수 필터가 사실상 동작하지 않는다.
-// 그 사실 자체를 테스트로 박아둔다 — 실계수가 들어오면 이 테스트가 깨지면서
-// "이제 필터가 산다"는 걸 알려준다. ---
+// 예전엔 출하 자산이 전부 1.0이라 층수 필터가 사실상 항등이었고, 그 사실을
+// 테스트로 박아 "실계수가 들어오면 깨지면서 알려주게" 해뒀다.
+//
+// **2026-08-09에 실제로 깨졌다** — 신동환 승인 계수가 들어오면서. 게이트가
+// 설계대로 울린 것이고, 이제 반대 방향을 고정한다: 필터가 정말 살아 있는가. ---
 
-test("실데이터: 출하된 floor_coefficients.json은 잠정값이라 층수 필터가 현재 항등이다", () => {
+test("실데이터: 신동환 확정 계수가 들어와 층수 필터가 실제로 동작한다", () => {
   const shipped = readJSON("../../data/domain/floor_coefficients.json");
-  assert.equal(shipped.provisional, true);
   assert.equal(typeof shipped.min_coefficient, "number",
     "min_coefficient는 startup_filter 폐기 후 이 파일로 옮겨왔다");
 
-  const allCoefficients = Object.values(shipped.coefficients)
-    .flatMap((byFloor) => Object.values(byFloor));
-  assert.ok(allCoefficients.every((c) => c >= shipped.min_coefficient),
-    "모든 계수가 기준 이상이라 어떤 업종도 층수로 탈락하지 않는다 — 배포 게이트");
+  const all = Object.entries(shipped.coefficients)
+    .flatMap(([g, byFloor]) => Object.entries(byFloor).map(([f, c]) => ({ g, f, c })));
+
+  // 전부 1.0이던 시절로 되돌아가면(빌드 사고·자산 덮어쓰기) 층수 입력이 다시
+  // 장식이 된다. 조용히 그렇게 되는 걸 막는 게 이 테스트의 목적이다.
+  assert.ok(all.some((x) => x.c !== 1.0),
+    "모든 계수가 1.0이면 층수를 뭘 고르든 등급이 같다 — 자산이 되돌아갔는지 확인할 것");
+
+  const excluded = all.filter((x) => x.c < shipped.min_coefficient);
+  assert.deepEqual(
+    excluded.map((x) => `${x.g}/${x.f}`).sort(),
+    ["복합의존형/F3P", "유동의존형/F3P"],
+    "대안 추천에서 탈락하는 조합 — 바뀌면 의도한 변경인지 확인할 것");
+
+  const warned = all.filter((x) => x.c < shipped.warn_below);
+  assert.equal(warned.length, 8, "층수 경고가 붙는 조합 수");
+
+  // 1층은 기준점이므로 어느 그룹에서도 1.00이어야 한다. 다른 값이 들어오면
+  // 계수의 의미(1층 대비 상대값)가 무너진다.
+  const f1 = all.filter((x) => x.f === "F1");
+  assert.ok(f1.length > 0 && f1.every((x) => x.c === 1.0),
+    "1층은 상대값의 기준점이라 반드시 1.00이다");
 });
 
 test("실데이터: 11110 상권에서 real assets로 recommend가 돌아간다 (의원 등장은 의도된 출력)", () => {

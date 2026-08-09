@@ -23,8 +23,8 @@ def _axis_df() -> pd.DataFrame:
     })
 
 
-def _assets():
-    return scoring.DomainAssets(
+def _assets(**over):
+    kwargs = dict(
         groups={"CS1": "유동의존형", "CS2": "배후의존형"},
         weights={
             "유동의존형": {"resident": 0.0, "worker": 0.0, "footfall": 0.4,
@@ -32,11 +32,26 @@ def _assets():
             "배후의존형": {"resident": 0.4, "worker": 0.0, "footfall": 0.0,
                         "competition": 0.3, "vitality": 0.2, "fit": 0.1},
         },
+        demand_modes={"유동의존형": scoring.MODE_MEAN, "배후의존형": scoring.MODE_MEAN},
+        strongest_weight=0.6,
         floors={"유동의존형": {f: 1.0 for f in FLOORS},
                 "배후의존형": {f: 1.0 for f in FLOORS}},
         floor_warn_below=0.75,
         floor_min_coefficient=0.6,
         provisional=True,
+    )
+    kwargs.update(over)
+    return scoring.DomainAssets(**kwargs)
+
+
+def _strongest_assets():
+    """수요 3축을 균등 배분한 최강우선 그룹 하나. 수요예산 = 0.45."""
+    return _assets(
+        groups={"CS1": "복합의존형", "CS2": "복합의존형"},
+        weights={"복합의존형": {"resident": 0.15, "worker": 0.15, "footfall": 0.15,
+                            "competition": 0.25, "vitality": 0.15, "fit": 0.15}},
+        demand_modes={"복합의존형": scoring.MODE_STRONGEST},
+        floors={"복합의존형": {f: 1.0 for f in FLOORS}},
     )
 
 
@@ -157,3 +172,75 @@ def test_missing_axis_does_not_zero_the_score():
     df.loc[0, "fit"] = None
     out = scoring.base_score(df, _assets())
     assert out.loc[0, "base_score"] > 0
+
+
+# ── 최강우선 (2026-08-09 신동환 결정) ────────────────────────────────
+
+def test_strongest_first_lifts_a_single_strong_demand_axis():
+    """한 축만 강한 자리를 평균이 눌러버리지 않는지 — 이 방식의 존재 이유."""
+    df = _axis_df().head(1).copy()
+    df.loc[:, "industry_code"] = "CS1"
+    # 용산구청 유형: 직장만 압도적이고 나머지는 낮다.
+    df.loc[:, ["demand_raw_resident", "demand_raw_worker", "demand_raw_footfall"]] = [19, 99, 24]
+    df.loc[:, ["competition", "vitality", "fit"]] = [50, 50, 50]
+
+    strongest = scoring.base_score(df, _strongest_assets())["base_score"].iloc[0]
+
+    mean_assets = _strongest_assets()
+    mean_only = scoring.DomainAssets(
+        **{**mean_assets.__dict__, "demand_modes": {"복합의존형": scoring.MODE_MEAN}})
+    averaged = scoring.base_score(df, mean_only)["base_score"].iloc[0]
+
+    # 수요 = 99*0.6 + (19+24)/2*0.4 = 59.4 + 8.6 = 68.0  (평균이면 47.33)
+    assert strongest > averaged
+    expected = (68.0 * 0.45 + 50 * 0.25 + 50 * 0.15 + 50 * 0.15) / 1.0
+    assert strongest == pytest.approx(expected, abs=1e-9)
+
+
+def test_strongest_first_still_penalises_weak_on_all_three():
+    """세 축이 전부 약하면 여전히 낮아야 한다 — 나머지 0.4가 그 역할."""
+    df = _axis_df().head(1).copy()
+    df.loc[:, "industry_code"] = "CS1"
+    df.loc[:, ["demand_raw_resident", "demand_raw_worker", "demand_raw_footfall"]] = [20, 22, 18]
+    df.loc[:, ["competition", "vitality", "fit"]] = [50, 50, 50]
+    out = scoring.base_score(df, _strongest_assets())["base_score"].iloc[0]
+    # 수요 = 22*0.6 + 19*0.4 = 20.8 — 최강축이 약하면 결과도 약하다
+    assert out == pytest.approx((20.8 * 0.45 + 50 * 0.55), abs=1e-9)
+
+
+def test_strongest_first_with_one_axis_missing_uses_the_rest():
+    df = _axis_df().head(1).copy()
+    df.loc[:, "industry_code"] = "CS1"
+    demand_cols = ["demand_raw_resident", "demand_raw_worker", "demand_raw_footfall"]
+    df[demand_cols] = df[demand_cols].astype(float)
+    df.loc[:, demand_cols] = [80.0, 40.0, None]
+    df.loc[:, ["competition", "vitality", "fit"]] = [50, 50, 50]
+    out = scoring.base_score(df, _strongest_assets())["base_score"].iloc[0]
+    assert out == pytest.approx((80 * 0.6 + 40 * 0.4) * 0.45 + 50 * 0.55, abs=1e-9)
+
+
+def test_strongest_first_with_only_one_axis_present_does_not_invent_weakness():
+    """축이 하나뿐이면 그 축이 곧 수요다. 없는 축을 0으로 채우면 약점을 지어낸다."""
+    df = _axis_df().head(1).copy()
+    df.loc[:, "industry_code"] = "CS1"
+    demand_cols = ["demand_raw_resident", "demand_raw_worker", "demand_raw_footfall"]
+    df[demand_cols] = df[demand_cols].astype(float)
+    df.loc[:, demand_cols] = [None, 90.0, None]
+    df.loc[:, ["competition", "vitality", "fit"]] = [50, 50, 50]
+    out = scoring.base_score(df, _strongest_assets())["base_score"].iloc[0]
+    assert out == pytest.approx(90 * 0.45 + 50 * 0.55, abs=1e-9)
+
+
+def test_load_domain_rejects_unknown_demand_mode(tmp_path, monkeypatch):
+    """모르는 방식을 조용히 평균으로 넘기면 화면 설명과 실제 계산이 달라진다."""
+    import json as _json
+    from etl import config as _config
+    src = _config.DOMAIN_DIR
+    for name in ("industry_groups.json", "axis_weights.json", "floor_coefficients.json"):
+        (tmp_path / name).write_text((src / name).read_text(encoding="utf-8"), encoding="utf-8")
+    w = _json.loads((tmp_path / "axis_weights.json").read_text(encoding="utf-8"))
+    w["demand_modes"]["복합의존형"] = "최대값만"
+    (tmp_path / "axis_weights.json").write_text(_json.dumps(w, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(scoring, "DOMAIN_DIR", tmp_path)
+    with pytest.raises(ValueError, match="demand_mode"):
+        scoring.load_domain()

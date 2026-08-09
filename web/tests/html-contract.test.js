@@ -65,9 +65,23 @@ function num(src, re, label) {
   return Number(m[1]);
 }
 
+// N1: 이 계약이 처음엔 /narrate 쌍만 고정해서, **/map-industry 쌍이 3000 대
+// 3000으로 사실상 역전된 채 통과했다.** OpenRouter를 부르는 브라우저 진입점은
+// 둘이므로 둘 다 건다.
+const modelTimeout = () => num(workerSrc, /MODEL_TIMEOUT_MS\s*=\s*(\d+)/, "worker의 MODEL_TIMEOUT_MS");
+
 test("워커→OpenRouter 타임아웃은 브라우저→/narrate 타임아웃보다 짧아야 한다", () => {
   const browser = num(narrateSrc, /timeoutMs\s*=\s*(\d+)/, "narrate.js의 timeoutMs 기본값");
-  const worker = num(workerSrc, /MODEL_TIMEOUT_MS\s*=\s*(\d+)/, "worker의 MODEL_TIMEOUT_MS");
+  const worker = modelTimeout();
   assert.ok(worker < browser,
     `워커(${worker}ms)가 브라우저(${browser}ms)보다 오래 기다리면 받지도 못할 응답에 크레딧을 쓴다`);
+});
+
+test("워커→OpenRouter 타임아웃은 브라우저→/map-industry 타임아웃보다도 짧아야 한다", () => {
+  const mainSrcLocal = fs.readFileSync(fileURLToPath(new URL("js/main.js", root)), "utf8");
+  const browser = num(mainSrcLocal, /MAP_INDUSTRY_TIMEOUT_MS\s*=\s*(\d+)/, "main.js의 MAP_INDUSTRY_TIMEOUT_MS");
+  const worker = modelTimeout();
+  assert.ok(worker < browser,
+    `/map-industry도 OpenRouter를 부른다 — 워커(${worker}ms) >= 브라우저(${browser}ms)면 `
+    + "크레딧은 나가고 결과는 버려진다. 이쪽은 캐시조차 없어 매번 반복된다");
 });

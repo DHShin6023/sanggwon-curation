@@ -44,8 +44,27 @@ const seoulDate = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().
 // 안전판일 뿐이다. 배포 시 OpenRouter 대시보드에서 쓸 모델의 정확한 id를 확인해
 // env.MODEL로 반드시 지정할 것(README). 여기에 특정 id를 미리 적지 않는 이유는
 // 그게 이 코드가 확인할 수 없는 사실이기 때문이다.
-// 모델이 죽어 있으면 askModel()이 null을 반환하고 프론트가 템플릿으로 떨어진다.
+// 모델이 죽어 있으면 askModel()이 {called:false, text:null}을 반환하고(호출로
+// 세지 않는다) 프론트가 템플릿으로 떨어진다.
 const DEFAULT_MODEL = "google/gemini-2.0-flash-exp:free";
+
+// N3: `Number(x) || 기본값`은 **0을 기본값으로 되돌린다.** README가 "지출을
+// 줄이려면 GLOBAL_DAILY_LIMIT을 내린다"고 안내하는데, 급해서 0을 넣으면 AI가
+// 꺼지는 게 아니라 100으로 되살아났다 — 안내와 정반대다. 오타("1,000"→NaN)도
+// 조용히 100이 됐다.
+// 0은 "AI를 끈다"는 유효한 설정이므로 그대로 존중하고, 해석할 수 없는 값은
+// 로그를 남긴 뒤 기본값으로 간다(빌드 없이 콘솔에서 고칠 수 있어야 한다).
+function parseLimit(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return DEFAULT_GLOBAL_DAILY_LIMIT;
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    console.error(`GLOBAL_DAILY_LIMIT을 해석할 수 없다: ${JSON.stringify(raw)} — 기본값 ${DEFAULT_GLOBAL_DAILY_LIMIT}을 쓴다. 콤마·공백 없는 정수로 넣을 것`);
+    return DEFAULT_GLOBAL_DAILY_LIMIT;
+  }
+  return Math.floor(n);
+}
 
 const cors = (origin) => ({
   "access-control-allow-origin": origin,
@@ -139,7 +158,7 @@ async function aiBudget(request, env) {
     const [ipRaw, globalRaw] = await Promise.all([kv.get(ipKey), kv.get(globalKey)]);
     const ipCount = Number(ipRaw) || 0;
     const globalCount = Number(globalRaw) || 0;
-    const globalLimit = Number(env.GLOBAL_DAILY_LIMIT) || DEFAULT_GLOBAL_DAILY_LIMIT;
+    const globalLimit = parseLimit(env.GLOBAL_DAILY_LIMIT);
     // 개정 (나)4: 초과 시에는 읽기만 하고 쓰지 않는다.
     if (ipCount >= IP_DAILY_LIMIT || globalCount >= globalLimit) return null;
 
@@ -175,9 +194,19 @@ async function askModel(env, system, user, maxTokens) {
     // 네트워크 실패·타임아웃 abort. 예전엔 여기서 던진 예외가 바깥 try까지
     // 올라가 500이 나갔고, 프론트는 그걸 폴백이 아니라 오류로 받았다.
     console.error("askModel 업스트림 실패:", error);
-    return { called: false, text: null };
+    // N2: **타임아웃은 센다.** 우리가 abort해도 요청은 이미 OpenRouter에
+    // 도착했고, 모델이 토큰을 뽑았다면 그건 과금된다 — 우리가 안 받았을 뿐이다.
+    // 안 세면 업스트림이 느려질 때 한도가 통째로 무력해진다(실측: abort만
+    // 반복시키면 500건을 내보내도 전역 카운터가 0). 지출 상한이 "느릴 때만
+    // 풀리는" 상한이면 상한이 아니다.
+    // 반대로 **송신 전 실패는 세지 않는다** — DNS·연결 실패는 모델에 닿지도
+    // 못했으므로 과금이 없고, 이걸 세면 업스트림 장애가 그날 한도를 태운다.
+    const dispatched = error?.name === "TimeoutError" || error?.name === "AbortError";
+    return { called: dispatched, text: null };
   }
   // 모델 사망·인증 실패 전부 여기 — 프론트가 템플릿으로 떨어진다.
+  // 세지 않는다: 4xx는 서버가 생성 전에 거절한 것이라 과금이 없고, MODEL을
+  // 잘못 넣었을 때 하루 한도를 통째로 태우는 걸 막는 게 M4의 취지였다.
   if (!res.ok) return { called: false, text: null };
 
   try {

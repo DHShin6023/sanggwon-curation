@@ -39,9 +39,27 @@ import { renderResult } from "./render.js";
 
 const PROXY = "https://sanggwon-proxy.<계정>.workers.dev";  // Task 12에서 실제 주소로 교체
 
-// I2: 업종매핑은 사용자가 대기하는 임계 경로 위에 있어 짧게, 해설은
-// 판정이 이미 화면에 나온 뒤 덧붙는 문장이라 조금 길게 잡는다.
-const MAP_INDUSTRY_TIMEOUT_MS = 3000;
+// I2 / N1: 브라우저 쪽 한도는 **워커의 업스트림 한도보다 커야 한다.** 작으면
+// 브라우저가 먼저 포기한 뒤에도 워커가 호출을 끝내서, OpenRouter 크레딧은
+// 나가고 결과는 아무도 못 받는다. `/map-industry`는 캐시도 없어서 같은 입력에
+// 매번 반복된다.
+//
+// ⚠️ 예전 주석은 "업종매핑은 임계 경로라 짧게, 해설은 판정이 화면에 나온 뒤
+// 덧붙어서 길게"라고 적혀 있었는데 **둘 다 사실이 아니었다**. analyze()는
+// aiNarration()을 await한 뒤에야 결과를 반환하므로(아래 참조) 해설도 임계
+// 경로 위에 있고, 3000ms는 워커의 MODEL_TIMEOUT_MS와 같아서 "짧게"가 아니라
+// "역전"이었다. 실제 기준은 하나뿐이다 — 워커보다 크게.
+// 이 관계는 web/tests/html-contract.test.js가 두 쌍 모두 고정한다.
+const MAP_INDUSTRY_TIMEOUT_MS = 4000;
+
+// N7: /geocode에는 타임아웃이 아예 없었다. 이 호출이 멈추면 등급 자체가 안
+// 나오므로 **화면이 통째로 아무 변화 없이 선다** — 폴백이 있는 다른 두 경로와
+// 달리 여기는 폴백이 없다. 넉넉히 잡되 무한 대기만은 막는다.
+// 워커 쪽 카카오 호출이 최대 3번(주소검색 → 키워드검색 → coord2regioncode)이라
+// 워커 총 예산이 이 값을 넘을 수 있는데, 그건 감수한다 — 카카오는 건당 과금이
+// 아니라 무료 할당량(10만/일)이라 버려지는 호출의 대가가 크레딧이 아니고,
+// 사용자를 15초씩 세워두는 쪽이 더 비싸다.
+const GEOCODE_TIMEOUT_MS = 10000;
 
 const cache = new Map();
 const loadJson = async (path) => {
@@ -188,7 +206,21 @@ if (industryList && meta) {
 }
 
 async function geocode(address) {
-  const res = await fetch(`${PROXY}/geocode?q=${encodeURIComponent(address)}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GEOCODE_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${PROXY}/geocode?q=${encodeURIComponent(address)}`,
+      { signal: controller.signal });
+  } catch (error) {
+    // 멈춘 것과 못 찾은 것은 사용자가 할 일이 다르다. 주소를 고쳐 쓰라는
+    // 안내를 접속 실패에 띄우면 멀쩡한 주소를 계속 고쳐 쓰게 된다.
+    throw new Error(error?.name === "AbortError"
+      ? "주소 조회가 지연되고 있습니다. 잠시 후 다시 시도해 주세요."
+      : "주소 조회에 실패했습니다. 네트워크 상태를 확인해 주세요.");
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) throw new Error("주소를 찾지 못했습니다. 도로명 또는 지번으로 다시 입력해 주세요.");
   return res.json();   // { lng, lat, gu_code, dong_code }
 }

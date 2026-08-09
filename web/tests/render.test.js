@@ -360,10 +360,15 @@ test("M2: AI 고지는 AI 문단 안의 수치를 보증하지 않고, 어긋날
   const root = new FakeNode("section");
   renderResult(root, areaPayload({ narration: { ...NARRATION, aiText: AI_TEXT } }));
   const note = root.query("ai-narration-note");
-  assert.match(note.textContent, /아래/,
-    "보증 대상이 AI 문단이 아니라 아래의 규칙 계산 값임을 가리켜야 한다");
-  assert.match(note.textContent, /다르게 말하면 아래 값이 맞습니다/,
+  // N8: 등급은 이 상자보다 위(head)에 그려지므로 「아래 값」으로 가리키면
+  // 정작 사용자가 제일 신경 쓰는 값을 안 가리키게 된다. 방향이 아니라
+  // 출처(규칙 계산)로 가리켜야 한다.
+  assert.match(note.textContent, /AI와 무관하게 규칙으로 계산/,
+    "보증 대상이 AI 문단이 아니라 규칙으로 계산된 값임을 가리켜야 한다");
+  assert.match(note.textContent, /규칙으로 계산된 쪽이 맞습니다/,
     "둘이 어긋날 때 규칙 쪽이 우선임을 밝혀야 한다");
+  assert.doesNotMatch(note.textContent, /아래 값/,
+    "등급은 이 상자 위에 있다 — 「아래」로 가리키면 틀린 안내가 된다");
 });
 
 test("Task 12: aiText가 없으면(AI 실패·미배포) 아무 흔적도 남기지 않는다", () => {

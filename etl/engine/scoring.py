@@ -21,10 +21,20 @@ AXIS_KEYS = {
 }
 
 
+DEMAND_KEYS = ("resident", "worker", "footfall")
+
+# 수요 3축을 합치는 방식(2026-08-09 신동환 결정).
+MODE_MEAN = "평균"            # 세 축을 각자 가중치대로 더한다
+MODE_STRONGEST = "최강우선"   # 세 축의 가중치를 하나로 합쳐 최강축 우선으로 쓴다
+SUPPORTED_MODES = (MODE_MEAN, MODE_STRONGEST)
+
+
 @dataclass(frozen=True)
 class DomainAssets:
     groups: dict[str, str]              # 업종코드 → 그룹명
     weights: dict[str, dict[str, float]]  # 그룹명 → {축키: 가중치}
+    demand_modes: dict[str, str]          # 그룹명 → 수요결합방식
+    strongest_weight: float               # 최강우선에서 최강축이 갖는 몫
     floors: dict[str, dict[str, float]]   # 그룹명 → {층수코드: 계수}
     # 아래 둘은 브라우저가 쓰는 임계값이라 build가 meta.json에 실어 보낸다.
     # 웹은 data/ 아래만 fetch할 수 있어서(GitHub Pages 루트가 web/) data/domain/을
@@ -39,11 +49,32 @@ def load_domain() -> DomainAssets:
         return json.loads((DOMAIN_DIR / name).read_text(encoding="utf-8"))
 
     g, w, f = read("industry_groups.json"), read("axis_weights.json"), read("floor_coefficients.json")
+
+    # 수요결합방식을 모르면 죽는다. 조용히 평균으로 떨어뜨리면 복합의존형이
+    # "최강우선으로 계산됐다"는 표시만 달고 실제로는 평균으로 계산된다 —
+    # 이 프로젝트가 반복해서 잡아온 결함(없는 사실을 있는 것처럼)의 전형이다.
+    # demand_modes는 weights와 **분리해서** 둔다. 예전엔 가중치 dict 안에
+    # 문자열로 섞여 있었는데, 가중치 합계를 검사하는 코드가 그대로 깨졌다.
+    # 숫자만 담는 dict에 문자열을 섞지 않는다.
+    declared = w.get("demand_modes", {})
+    modes = {}
+    for group in w["weights"]:
+        mode = declared.get(group, MODE_MEAN)
+        if mode not in SUPPORTED_MODES:
+            raise ValueError(
+                f"axis_weights.json의 '{group}' demand_mode가 '{mode}'인데 "
+                f"엔진이 아는 방식은 {SUPPORTED_MODES}뿐이다. 구현하거나 값을 고칠 것 — "
+                "모르는 방식을 평균으로 넘기면 화면 설명과 실제 계산이 달라진다"
+            )
+        modes[group] = mode
+
     # 조용한 기본값을 두지 않는다 — 임계값이 빠진 채 배포되면 경고도 필터도
     # 있는 척만 하고 아무 일도 하지 않는다. 없으면 빌드가 여기서 죽는 편이 낫다.
     return DomainAssets(
         groups={code: item["group"] for code, item in g["assignment"].items()},
         weights=w["weights"],
+        demand_modes=modes,
+        strongest_weight=float(w["strongest_weight"]),
         floors=f["coefficients"],
         floor_warn_below=float(f["warn_below"]),
         floor_min_coefficient=float(f["min_coefficient"]),
@@ -83,8 +114,14 @@ def base_score(axis_df: pd.DataFrame, assets: DomainAssets) -> pd.DataFrame:
     total = pd.Series(0.0, index=out.index)
     weight_sum = pd.Series(0.0, index=out.index)
 
+    # 최강우선 그룹은 수요 3축을 개별로 더하지 않는다 — 아래에서 하나로 묶어
+    # 처리하므로 이 루프에서는 건너뛴다.
+    strongest = group.map(lambda g: assets.demand_modes.get(g) == MODE_STRONGEST)
+
     for key, column in AXIS_KEYS.items():
         w = group.map(lambda g: assets.weights.get(g, {}).get(key, 0.0)).astype(float)
+        if key in DEMAND_KEYS:
+            w = w.where(~strongest, 0.0)
         value = pd.to_numeric(out[column], errors="coerce")
         present = value.notna()
         # .where(present, 0.0)가 이미 결측 행을 0으로 만든다. 여기에 fillna를
@@ -92,6 +129,43 @@ def base_score(axis_df: pd.DataFrame, assets: DomainAssets) -> pd.DataFrame:
         # 다음 사람을 오도한다 — 이 프로젝트에서 세 번 터진 결함이다.
         total += (value * w).where(present, 0.0)
         weight_sum += w.where(present, 0.0)
+
+    # ── 최강우선 (2026-08-09 신동환 결정) ────────────────────────────
+    #
+    # 한식·커피·편의점처럼 주거·직장·유동 중 **하나만 강해도 성립**하는 업종이
+    # 있다. 평균으로 더하면 여의도 한식(직장 99·주거 19·유동 24)이 세 축 평균에
+    # 눌려 실제보다 나쁘게 나온다.
+    #
+    # 그래서 세 축의 가중치를 하나의 "수요예산"으로 합치고, 그 예산 안에서
+    #     최강축 × 0.6 + 나머지 평균 × 0.4
+    # 로 계산한다. 한 축만 강한 자리를 제대로 집으면서, 세 축이 전부 약한 자리는
+    # 여전히 걸러낸다(나머지 0.4가 그 역할을 한다).
+    if strongest.any():
+        demand = out[[AXIS_KEYS[k] for k in DEMAND_KEYS]].apply(
+            pd.to_numeric, errors="coerce")
+        n_present = demand.notna().sum(axis=1)
+        mx = demand.max(axis=1)          # skipna 기본값 True
+        rest_sum = demand.sum(axis=1) - mx.fillna(0.0)
+        # 축이 하나뿐이면 "나머지 평균"이 없다. 그때는 그 축이 곧 수요다 —
+        # 0으로 채우면 있지도 않은 약점을 지어내는 셈이 된다.
+        rest_mean = (rest_sum / (n_present - 1)).where(n_present > 1)
+        combined = np.where(
+            n_present > 1,
+            mx * assets.strongest_weight + rest_mean * (1 - assets.strongest_weight),
+            mx,
+        )
+        combined = pd.Series(combined, index=out.index).where(n_present > 0)
+
+        # 예산은 세 축 가중치의 합이다. 일부 축이 결측이어도 예산을 깎지 않는다 —
+        # "하나만 강해도 성립"이 이 방식의 전제이므로, 축이 없다고 수요 자체의
+        # 비중을 줄이면 방식이 스스로를 부정한다.
+        budget = group.map(
+            lambda g: sum(assets.weights.get(g, {}).get(k, 0.0) for k in DEMAND_KEYS)
+        ).astype(float).where(strongest, 0.0)
+
+        present = combined.notna() & strongest
+        total += (combined * budget).where(present, 0.0)
+        weight_sum += budget.where(present, 0.0)
 
     # 0~100 입력의 가중평균은 정의상 0~100을 벗어날 수 없다. clip을 걸면
     # 상류에서 범위가 깨졌을 때 조용히 감춰지므로 걸지 않는다.

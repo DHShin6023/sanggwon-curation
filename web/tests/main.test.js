@@ -336,7 +336,7 @@ test("I5(M6 확인): 에러 이후 성공적으로 재제출하면 이전 role=a
 // 실좌표: 구 11110 "배화여자대학교(박노수미술관)"에 매치되고 CS100001은 base != null.
 const HAPPY_GEO = { lng: 126.96686300917433, lat: 37.580259174311934, gu_code: "11110", dong_code: "11110515" };
 
-test("Task 12: 로컬 매칭이 성공하면 AI 업종매핑을 호출하지 않는다(무료 할당량)", async () => {
+test("Task 12: 로컬 매칭이 성공하면 AI 업종매핑을 호출하지 않는다(지출 절감)", async () => {
   installDom(ALL_IDS);
   const proxyCalls = [];
   stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO, proxyCalls });
@@ -345,7 +345,7 @@ test("Task 12: 로컬 매칭이 성공하면 AI 업종매핑을 호출하지 않
   const payload = await analyze({ address: "아무 주소", industryText: "한식음식점", floor: "F2" });
   assert.equal(payload.industryName, "한식음식점");
   assert.ok(!proxyCalls.some((u) => u.includes("/map-industry")),
-    "로컬에서 이미 찾았는데 AI를 부르면 하루 50건짜리 할당량을 낭비한다");
+    "로컬에서 이미 찾았는데 AI를 부르면 크레딧과 일 한도를 그냥 태우는 것이다");
 });
 
 test("Task 12: 로컬 매칭이 실패하면 AI 업종매핑이 돌려준 코드로 매핑된다", async () => {

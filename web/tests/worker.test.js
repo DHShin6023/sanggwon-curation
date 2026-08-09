@@ -351,6 +351,61 @@ test("M5: env.GLOBAL_DAILY_LIMIT로 한도를 바꿀 수 있다(지출 상한)",
   assert.equal((await res.json()).text, null, "env로 내린 한도가 실제로 먹어야 한다");
 });
 
+test("N3: GLOBAL_DAILY_LIMIT=0은 AI를 끈다 — 기본값 100으로 되살아나면 안 된다", async () => {
+  // `Number(x) || 기본값`은 0을 기본값으로 되돌린다. README가 "지출을 줄이려면
+  // 이 값을 내리라"고 안내하는데, 급해서 0을 넣으면 정반대로 100이 됐다.
+  stubUpstream({ "openrouter.ai": () => OPENROUTER_OK("해설") });
+  const kv = fakeKV();
+  const res = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+    { OPENROUTER_KEY: "o", RATE: kv, GLOBAL_DAILY_LIMIT: "0" });
+  assert.equal((await res.json()).text, null, "0은 '끈다'는 뜻이지 '기본값으로 돌아가라'가 아니다");
+  assert.equal(kv.store.size, 0, "한도 초과 시에는 KV에 쓰지 않는다");
+});
+
+test("N3: 해석할 수 없는 GLOBAL_DAILY_LIMIT은 기본값으로 가되 조용하지 않다", async () => {
+  const errors = [];
+  const original = console.error;
+  console.error = (...a) => errors.push(a.join(" "));
+  try {
+    stubUpstream({ "openrouter.ai": () => OPENROUTER_OK("해설") });
+    const res = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+      { OPENROUTER_KEY: "o", RATE: fakeKV(), GLOBAL_DAILY_LIMIT: "1,000" });
+    assert.equal((await res.json()).text, "해설", "기본값(100)으로 동작해야 한다");
+    assert.ok(errors.some((e) => e.includes("GLOBAL_DAILY_LIMIT")),
+      "오타가 조용히 기본값이 되면 운영자는 한도를 걸었다고 믿는다");
+  } finally {
+    console.error = original;
+  }
+});
+
+test("N2: 타임아웃된 모델 호출도 지출로 센다", async () => {
+  // 우리가 abort해도 요청은 이미 OpenRouter에 도착했고, 모델이 토큰을 뽑았다면
+  // 과금된다. 안 세면 업스트림이 느려질 때 한도가 통째로 무력해진다 —
+  // 리뷰어 실측: abort만 반복시키면 500건을 내보내도 전역 카운터가 0이었다.
+  stubUpstream({ "openrouter.ai": () => {
+    const e = new Error("The operation was aborted due to timeout");
+    e.name = "TimeoutError";
+    throw e;
+  } });
+  const kv = fakeKV();
+  const res = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+    { OPENROUTER_KEY: "o", RATE: kv });
+  assert.equal((await res.json()).text, null, "사용자에게는 조용히 폴백");
+  assert.equal(kv.store.get(`rate:global:${TODAY}`), "1",
+    "타임아웃을 안 세면 느린 업스트림이 지출 상한을 무력화한다");
+});
+
+test("N2: 송신 전 네트워크 실패는 지출로 세지 않는다", async () => {
+  // DNS·연결 실패는 모델에 닿지도 못했으므로 과금이 없다. 이걸 세면
+  // 업스트림 장애가 그날 한도를 통째로 태운다.
+  stubUpstream({ "openrouter.ai": () => { throw new TypeError("fetch failed"); } });
+  const kv = fakeKV();
+  const res = await worker.fetch(post("/narrate", { payload: { grade: "중하" } }),
+    { OPENROUTER_KEY: "o", RATE: kv });
+  assert.equal((await res.json()).text, null);
+  assert.equal(kv.store.size, 0, "닿지도 못한 호출을 세면 장애가 곧 한도 소진이 된다");
+});
+
 // ── M6: 일 한도 키는 KST 기준 ────────────────────────────────────────
 
 test("M6: 날짜 키는 UTC가 아니라 KST 기준이다", async (t) => {
