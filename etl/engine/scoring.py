@@ -35,6 +35,7 @@ class DomainAssets:
     weights: dict[str, dict[str, float]]  # 그룹명 → {축키: 가중치}
     demand_modes: dict[str, str]          # 그룹명 → 수요결합방식
     strongest_weight: float               # 최강우선에서 최강축이 갖는 몫
+    aliases: dict[str, str]               # 정규화된 별칭 → 업종코드
     floors: dict[str, dict[str, float]]   # 그룹명 → {층수코드: 계수}
     # 아래 둘은 브라우저가 쓰는 임계값이라 build가 meta.json에 실어 보낸다.
     # 웹은 data/ 아래만 fetch할 수 있어서(GitHub Pages 루트가 web/) data/domain/을
@@ -49,6 +50,30 @@ def load_domain() -> DomainAssets:
         return json.loads((DOMAIN_DIR / name).read_text(encoding="utf-8"))
 
     g, w, f = read("industry_groups.json"), read("axis_weights.json"), read("floor_coefficients.json")
+    a = read("industry_aliases.json")
+
+    # 별칭 사전. 조용한 실패를 허용하지 않는다 — 한 별칭이 두 업종을 가리키면
+    # 사용자는 왜 그 업종으로 갔는지 알 수 없고, 모르는 업종코드를 놔두면
+    # 그 별칭이 영영 죽은 채로 남는다. 둘 다 빌드에서 죽인다.
+    known_names = {code: item["name"] for code, item in g["assignment"].items()}
+    aliases: dict[str, str] = {}
+    for code, words in a["aliases"].items():
+        if code not in known_names:
+            raise ValueError(
+                f"industry_aliases.json에 모르는 업종코드 '{code}'가 있다. "
+                "분류표(industry_groups.json)에 없는 코드다 — 오타이거나 폐지된 업종이다")
+        for word in words:
+            key = word.replace(" ", "")
+            if key in aliases and aliases[key] != code:
+                raise ValueError(
+                    f"별칭 '{word}'이 두 업종을 가리킨다: "
+                    f"{known_names[aliases[key]]} / {known_names[code]}. "
+                    "하나를 조용히 고르면 사용자는 왜 그 업종이 됐는지 알 수 없다 — 별칭을 나눌 것")
+            if key in {n.replace(" ", "") for n in known_names.values()}:
+                raise ValueError(
+                    f"별칭 '{word}'이 표준 업종명과 같다. 정확일치가 먼저 처리하므로 "
+                    "여기 두면 중복이다 — 목록에서 지울 것")
+            aliases[key] = code
 
     # 수요결합방식을 모르면 죽는다. 조용히 평균으로 떨어뜨리면 복합의존형이
     # "최강우선으로 계산됐다"는 표시만 달고 실제로는 평균으로 계산된다 —
@@ -75,10 +100,11 @@ def load_domain() -> DomainAssets:
         weights=w["weights"],
         demand_modes=modes,
         strongest_weight=float(w["strongest_weight"]),
+        aliases=aliases,
         floors=f["coefficients"],
         floor_warn_below=float(f["warn_below"]),
         floor_min_coefficient=float(f["min_coefficient"]),
-        provisional=any(x.get("provisional", False) for x in (g, w, f)),
+        provisional=any(x.get("provisional", False) for x in (g, w, f, a)),
     )
 
 

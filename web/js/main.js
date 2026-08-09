@@ -34,31 +34,21 @@
 import { matchArea, resolvePrecision } from "./locate.js";
 import { judge, FLOOR_LABELS } from "./verdict.js";
 import { recommend } from "./alternatives.js";
-import { templateNarration, aiNarration } from "./narrate.js";
+import { templateNarration } from "./narrate.js";
 import { renderResult } from "./render.js";
 
 const PROXY = "https://sanggwon-proxy.<계정>.workers.dev";  // Task 12에서 실제 주소로 교체
 
-// I2 / N1: 브라우저 쪽 한도는 **워커의 업스트림 한도보다 커야 한다.** 작으면
-// 브라우저가 먼저 포기한 뒤에도 워커가 호출을 끝내서, OpenRouter 크레딧은
-// 나가고 결과는 아무도 못 받는다. `/map-industry`는 캐시도 없어서 같은 입력에
-// 매번 반복된다.
-//
-// ⚠️ 예전 주석은 "업종매핑은 임계 경로라 짧게, 해설은 판정이 화면에 나온 뒤
-// 덧붙어서 길게"라고 적혀 있었는데 **둘 다 사실이 아니었다**. analyze()는
-// aiNarration()을 await한 뒤에야 결과를 반환하므로(아래 참조) 해설도 임계
-// 경로 위에 있고, 3000ms는 워커의 MODEL_TIMEOUT_MS와 같아서 "짧게"가 아니라
-// "역전"이었다. 실제 기준은 하나뿐이다 — 워커보다 크게.
-// 이 관계는 web/tests/html-contract.test.js가 두 쌍 모두 고정한다.
-const MAP_INDUSTRY_TIMEOUT_MS = 4000;
-
 // N7: /geocode에는 타임아웃이 아예 없었다. 이 호출이 멈추면 등급 자체가 안
-// 나오므로 **화면이 통째로 아무 변화 없이 선다** — 폴백이 있는 다른 두 경로와
-// 달리 여기는 폴백이 없다. 넉넉히 잡되 무한 대기만은 막는다.
+// 나오므로 **화면이 통째로 아무 변화 없이 선다**. 넉넉히 잡되 무한 대기만은 막는다.
 // 워커 쪽 카카오 호출이 최대 3번(주소검색 → 키워드검색 → coord2regioncode)이라
 // 워커 총 예산이 이 값을 넘을 수 있는데, 그건 감수한다 — 카카오는 건당 과금이
 // 아니라 무료 할당량(10만/일)이라 버려지는 호출의 대가가 크레딧이 아니고,
 // 사용자를 15초씩 세워두는 쪽이 더 비싸다.
+//
+// 2026-08-09: AI 두 엔드포인트를 걷어내면서 브라우저가 워커를 부르는 곳은
+// 여기 하나만 남았다. 예전에 있던 "안쪽이 바깥쪽보다 짧아야 한다"는 규칙은
+// 유료 호출이 버려지는 걸 막으려던 것이라, 지오코딩에는 적용되지 않는다.
 const GEOCODE_TIMEOUT_MS = 10000;
 
 const cache = new Map();
@@ -149,48 +139,45 @@ if (meta) {
 // 대부분의 정상 입력은 여기서 끝난다. 아주 짧은 입력(길이<2)은 부분일치를
 // 시도하지 않는다 — "점" 한 글자가 "한식음식점" 등 거의 모든 음식점류와
 // 매치되는 것처럼, 부분일치가 오탐을 낼 위험이 커진다.
+const normalizeQuery = (s) => (s ?? "").trim().replace(/\s+/g, "");
+
+// 별칭 사전(meta.industry_aliases)이 AI 업종매핑을 대체한다 — 2026-08-09 결정.
+//
+// 근거: 창업자가 실제로 쓸 법한 어휘 37개를 넣어보니 이름 부분일치만으로는
+// 26개(70%)가 실패했다. 그것도 카페·치킨집·술집·빵집·약국·병원처럼 가장 흔한
+// 말들이다("카페"는 "커피-음료"에 걸리지 않는다). AI로 메우던 자리인데,
+// 사전이 더 낫다: 공짜고, 즉시고, 거짓말을 못 하고, 틀리면 한 줄 고치면 된다.
+// (AI 매핑은 「미용」을 자동차미용으로 보내던 오답 전력이 있다.)
+//
+// 순서가 중요하다. 정확일치 → 별칭 → 부분일치.
+// 별칭을 부분일치보다 먼저 두지 않으면 「치킨집」이 부분일치에서 엉뚱한 데
+// 걸릴 수 있다. 부분일치는 마지막 그물이다.
 function mapIndustryLocal(q) {
   const exact = meta.industries.find((i) => i.name === q);
   if (exact) return exact;
+
+  const key = normalizeQuery(q);
+  const aliased = meta.industry_aliases?.[key];
+  if (aliased) {
+    const hit = meta.industries.find((i) => i.code === aliased);
+    // 사전이 가리키는 코드가 목록에 없으면 업종을 지어내지 않고 넘어간다.
+    // (빌드가 막고 있지만, 낡은 meta.json이 캐시돼 있을 수 있다.)
+    if (hit) return hit;
+  }
+
+  // 아주 짧은 입력(길이<2)은 부분일치를 시도하지 않는다 — "점" 한 글자가
+  // "한식음식점" 등 거의 모든 음식점류와 매치되는 것처럼 오탐이 커진다.
   if (q.length < 2) return null;
   return meta.industries.find((i) => i.name.includes(q) || q.includes(i.name)) ?? null;
 }
 
-async function mapIndustry(text) {
+// 못 찾으면 null이고, 호출부가 「목록에서 선택해 주세요」를 띄운다
+// (스펙 10.2 입구 폴백). 목록은 입력창 datalist에 항상 떠 있다.
+function mapIndustry(text) {
   if (!meta) return null;
   const q = (text ?? "").trim();
   if (!q) return null;
-
-  const local = mapIndustryLocal(q);
-  if (local) return local;
-
-  // AI 폴백. 실패(미배포·네트워크·타임아웃·한도 초과)는 조용히 삼키고 null로
-  // 떨어져 호출부가 "목록에서 선택해 주세요"를 띄운다(스펙 10.2 입구 폴백).
-  // 워커는 한도 초과 시 429가 아니라 200 {code: null}로 답한다(개정 (나)3).
-  //
-  // I2: 브라우저 fetch에는 기본 타임아웃이 없다. 타임아웃이 없으면 프록시가
-  // 멈췄을 때 analyze()가 화면 변화 없이 그대로 매달리고, 설계된 폴백은
-  // 영영 뜨지 않는다 — "조용히 삼킨다"가 아니라 "조용히 멈춘다"가 된다.
-  // 이 호출은 사용자가 대기하는 임계 경로 위에 있고 응답도 16토큰짜리라
-  // 짧게 잡는다.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), MAP_INDUSTRY_TIMEOUT_MS);
-  try {
-    const res = await fetch(`${PROXY}/map-industry`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: q, candidates: meta.industries }),
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const { code } = await res.json();
-    // 모델이 목록에 없는 코드를 지어낼 수 있다 — 실제 meta.industries에
-    // 있는 코드일 때만 받아들인다. 없으면 업종을 지어내지 않고 null이다.
-    return meta.industries.find((i) => i.code === code) ?? null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+  return mapIndustryLocal(q);
 }
 
 // datalist: 사용자가 실제로 존재하는 업종명을 볼 수 있게 한다 — 폼이
@@ -322,12 +309,6 @@ export async function analyze({ address, industryText, floor }) {
   };
   const narration = templateNarration(narrationInput);
 
-  // Task 12 (AI 출구). 워커에 보내는 payload와 validateNarration이 대조하는
-  // payload가 같은 객체여야 한다 — 모델이 실제로 본 수치만 "지어낸 게 아닌
-  // 수치"로 인정된다. 실패·검증 탈락은 전부 null이고, 그때 화면에는 아래
-  // 템플릿 해설만 남는다(스펙 11: 사용자에게 오류를 노출하지 않는다).
-  const aiText = await aiNarration(narrationInput, { endpoint: `${PROXY}/narrate` });
-
   // 개정 (다): 배열이 아니라 {recommendations, skipped}다. skipped는
   // 조용히 버리지 않는다 — console.warn으로 남긴다.
   const { recommendations, skipped } = recommend({
@@ -345,7 +326,7 @@ export async function analyze({ address, industryText, floor }) {
 
   return {
     ...base, areaName: area.name, areaType: area.area_type,
-    verdict, narration: { ...narration, aiText }, alternatives: recommendations,
+    verdict, narration, alternatives: recommendations,
     alternativesContext: { otherCount, skippedCount: skipped.length },
   };
 }

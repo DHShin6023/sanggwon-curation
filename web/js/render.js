@@ -268,32 +268,11 @@ export function renderResult(root, payload) {
   }
   root.append(head);
 
-  // Task 12: AI 해설. narrate.js의 validateNarration()을 통과한 문장만 여기
-  // 도달한다(통과 못 하면 main.js가 aiText를 안 싣는다). AI가 죽었거나 아직
-  // 배포 전이면 aiText 자체가 없고, 그때는 아무것도 그리지 않는다 — "AI
-  // 해설 없음" 같은 빈 자리도 남기지 않는다.
-  //
-  // 고지를 함께 붙이는 이유: 이 페이지의 다른 모든 문장은 룰엔진이 만든
-  // 것이고 이 문단만 생성모델이 쓴 것이다. 어느 쪽인지 구분되지 않으면
-  // 사용자는 AI 문장까지 계산 결과로 읽는다.
-  if (narration.aiText) {
-    const box = el("div", "ai-narration");
-    box.append(
-      el("p", null, narration.aiText),
-      // M2: 이전 문구(「등급과 근거 수치는 AI가 아니라 규칙으로 계산된
-      // 값입니다」)는 AI 문단 바로 밑에 붙어 있어서 **그 문단 안의 수치를
-      // 우리가 보증한다**는 뜻으로 읽혔다. 보증 대상은 이 페이지가 직접
-      // 계산해 아래에 표시하는 등급·근거이지 AI가 문장 안에 쓴 수가 아니다.
-      // 둘이 어긋나면 어느 쪽이 맞는지도 명시한다.
-      el("p", "ai-narration-note",
-        // N8: 등급은 이 상자보다 **위**(head)에 그려지므로 「아래 값이 맞다」로
-        // 뭉뚱그리면 정작 사용자가 제일 신경 쓰는 값을 안 가리킨다.
-        "※ 위 문단은 AI가 쓴 요약입니다. 판정 등급과 근거 항목은 AI와 무관하게 " +
-        "규칙으로 계산됩니다. 이 문단이 그 값들과 다르게 말하면 " +
-        "규칙으로 계산된 쪽이 맞습니다."),
-    );
-    root.append(box);
-  }
+  // 2026-08-09: 여기 있던 AI 해설 상자(narration.aiText + 「이 문단은 AI가
+  // 썼습니다」 고지)를 걷어냈다. AI 해설 경로 자체가 사라져 aiText가 절대
+  // 들어오지 않으므로, 남겨두면 영영 실행되지 않는 분기가 된다.
+  // 이 페이지의 모든 문장이 이제 룰엔진 산출물이라 "어느 쪽이 AI인지"를
+  // 구분해 알려야 할 이유도 함께 사라졌다.
 
   renderFactors(root, narration.factors);
   renderFloorNotes(root, narration);

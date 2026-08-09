@@ -23,22 +23,16 @@ const ALL_IDS = ["data-period", "sources", "provisional-notice", "query", "resul
 // "provisional 계수가 실제로 어떤 값인지"를 재현하려면 실제 meta.json을
 // 읽어서 일부러 망가뜨린 사본을 돌려줘야 한다.
 //
-// Task 12: 프록시 엔드포인트가 셋(/geocode, /map-industry, /narrate)이 됐으므로
+// 2026-08-09: 워커 엔드포인트는 /geocode 하나뿐이다(AI 둘 제거).
 // 하나로 뭉뚱그리지 않고 경로별로 응답을 나눈다. 지정하지 않은 엔드포인트는
 // {ok:false} — 즉 "아직 배포 안 된 프록시"와 같은 상태이고, 그 상태에서도
 // 등급·근거가 나와야 한다(개정 (바)). proxyCalls로 호출 여부도 확인한다.
 function stubFetch({ metaOk = true, geocodeResponse, metaTransform,
-                     mapIndustryResponse, narrateResponse, proxyCalls } = {}) {
+                     proxyCalls } = {}) {
   global.fetch = async (url) => {
     const u = String(url);
     if (u.startsWith("https://sanggwon-proxy")) {
       proxyCalls?.push(u);
-      if (u.includes("/map-industry")) {
-        return mapIndustryResponse ? { ok: true, json: async () => mapIndustryResponse } : { ok: false };
-      }
-      if (u.includes("/narrate")) {
-        return narrateResponse ? { ok: true, json: async () => narrateResponse } : { ok: false };
-      }
       if (!geocodeResponse) return { ok: false };
       return { ok: true, json: async () => geocodeResponse };
     }
@@ -340,125 +334,77 @@ test("I5(M6 확인): 에러 이후 성공적으로 재제출하면 이전 role=a
 });
 
 // ---------------------------------------------------------------------
-// Task 12: AI 입구(업종 매핑)·출구(해설) 연결. 개정 (라) — mapIndustry가
-// 동기에서 비동기로 바뀐다. 개정 (바) — 프록시는 아직 미배포라 AI 경로가
-// 조용히 실패하고 템플릿으로 떨어지는 것이 정상 동작이다.
+// 업종 인식 — 정확일치 → 별칭 사전 → 부분일치. 네트워크를 타지 않는다.
 // ---------------------------------------------------------------------
 
 // 실좌표: 구 11110 "배화여자대학교(박노수미술관)"에 매치되고 CS100001은 base != null.
 const HAPPY_GEO = { lng: 126.96686300917433, lat: 37.580259174311934, gu_code: "11110", dong_code: "11110515" };
 
-test("Task 12: 로컬 매칭이 성공하면 AI 업종매핑을 호출하지 않는다(지출 절감)", async () => {
+// ── 별칭 사전 (2026-08-09, AI 업종매핑 대체) ─────────────────────────
+//
+// 근거: 창업자 어휘 37개로 재보니 이름 부분일치만으로는 26개(70%)가 실패했다.
+// 카페·치킨집·술집·빵집·약국·병원처럼 가장 흔한 말이 전부 실패했다.
+
+test("별칭: 창업자가 실제로 쓰는 말이 표준 업종으로 매핑된다", async () => {
+  installDom(ALL_IDS);
+  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
+  const { analyze } = await importMain();
+
+  // "카페"는 "커피-음료"와 부분일치하지 않는다 — 사전이 없으면 실패하는 입력.
+  const payload = await analyze({ address: "아무 주소", industryText: "카페", floor: "F2" });
+  assert.equal(payload.industryName, "커피-음료");
+});
+
+test("별칭: 공백이 섞여도 같은 키로 본다", async () => {
+  installDom(ALL_IDS);
+  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
+  const { analyze } = await importMain();
+  const payload = await analyze({ address: "아무 주소", industryText: " 치킨 집 ", floor: "F2" });
+  assert.equal(payload.industryName, "치킨전문점");
+});
+
+test("별칭: 사전에도 없고 부분일치도 안 되면 업종을 지어내지 않는다", async () => {
+  installDom(ALL_IDS);
+  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
+  const { analyze } = await importMain();
+  await assert.rejects(
+    () => analyze({ address: "아무 주소", industryText: "사람들 머리 잘라주는 곳", floor: "F2" }),
+    /업종을 인식하지 못했습니다/,
+    "모르면 목록에서 고르시게 한다 — 비슷해 보이는 걸 고르면 그게 곧 지어내는 것이다",
+  );
+});
+
+test("별칭: 정확일치가 별칭보다 먼저다", async () => {
+  // 표준 업종명을 그대로 친 경우, 사전을 거치지 않고 바로 그 업종이어야 한다.
+  installDom(ALL_IDS);
+  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
+  const { analyze } = await importMain();
+  const payload = await analyze({ address: "아무 주소", industryText: "한식음식점", floor: "F2" });
+  assert.equal(payload.industryName, "한식음식점");
+});
+
+test("AI 제거 후: 워커에는 /geocode 말고 아무것도 부르지 않는다", async () => {
   installDom(ALL_IDS);
   const proxyCalls = [];
   stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO, proxyCalls });
   const { analyze } = await importMain();
 
-  const payload = await analyze({ address: "아무 주소", industryText: "한식음식점", floor: "F2" });
-  assert.equal(payload.industryName, "한식음식점");
-  assert.ok(!proxyCalls.some((u) => u.includes("/map-industry")),
-    "로컬에서 이미 찾았는데 AI를 부르면 크레딧과 일 한도를 그냥 태우는 것이다");
+  const payload = await analyze({ address: "아무 주소", industryText: "카페", floor: "F2" });
+  assert.ok(payload.verdict.grade, "등급은 그대로 나온다");
+  assert.ok(payload.narration.factors.length > 0, "템플릿 근거도 그대로 나온다");
+  const nonGeocode = proxyCalls.filter((u) => !u.includes("/geocode"));
+  assert.deepEqual(nonGeocode, [],
+    `워커 호출은 /geocode 하나뿐이어야 한다 — 실제 호출: ${proxyCalls.join(", ")}`);
 });
 
-test("Task 12: 로컬 매칭이 실패하면 AI 업종매핑이 돌려준 코드로 매핑된다", async () => {
+test("AI 제거 후: narration에 aiText 자리가 남아 있지 않다", async () => {
   installDom(ALL_IDS);
-  stubFetch({
-    metaOk: true,
-    geocodeResponse: HAPPY_GEO,
-    mapIndustryResponse: { code: "CS100010" }, // 커피-음료
-  });
+  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
   const { analyze } = await importMain();
-
-  // "카페라떼 파는 곳"은 meta.industries 어느 이름과도 부분일치하지 않는다.
-  const payload = await analyze({ address: "아무 주소", industryText: "카페라떼 파는 곳", floor: "F2" });
-  assert.equal(payload.industryName, "커피-음료");
+  const payload = await analyze({ address: "아무 주소", industryText: "한식", floor: "F1" });
+  assert.ok(!("aiText" in payload.narration),
+    "쓰지 않는 필드를 null로 남겨두면 다음 사람이 'AI가 실패했나'로 읽는다");
 });
 
-test("Task 12: AI가 {code: null}을 주면(확신 없음·한도 초과) 목록 선택 안내로 떨어진다", async () => {
-  installDom(ALL_IDS);
-  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO, mapIndustryResponse: { code: null } });
-  const { analyze } = await importMain();
-  await assert.rejects(
-    () => analyze({ address: "아무 주소", industryText: "카페라떼 파는 곳", floor: "F2" }),
-    /업종을 인식하지 못했습니다/,
-  );
-});
-
-test("Task 12: AI가 모르는 코드를 줘도 지어내지 않고 인식 실패로 떨어진다", async () => {
-  installDom(ALL_IDS);
-  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO, mapIndustryResponse: { code: "존재하지않는코드" } });
-  const { analyze } = await importMain();
-  await assert.rejects(
-    () => analyze({ address: "아무 주소", industryText: "카페라떼 파는 곳", floor: "F2" }),
-    /업종을 인식하지 못했습니다/,
-  );
-});
-
-test("Task 12: 검증을 통과한 AI 해설은 narration.aiText로 실린다", async () => {
-  installDom(ALL_IDS);
-  const aiText = "배화여자대학교 일대에서 한식음식점을 여시려는 자리입니다. " +
-    "통행량 자체는 나쁘지 않지만 경쟁이 만만치 않으니 작게 시작해 보시길 권합니다.";
-  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO, narrateResponse: { text: aiText } });
-  const { analyze } = await importMain();
-
-  const payload = await analyze({ address: "아무 주소", industryText: "한식", floor: "F2" });
-  assert.equal(payload.narration.aiText, aiText);
-});
-
-test("Task 12: 검증에 걸린 AI 해설은 aiText 없이 템플릿 해설만 남는다", async () => {
-  installDom(ALL_IDS);
-  // 성공 확률을 %로 말하는 문장 — validateNarration 규칙 2 위반.
-  stubFetch({
-    metaOk: true,
-    geocodeResponse: HAPPY_GEO,
-    narrateResponse: { text: "이 자리에서 성공할 확률은 대략 70% 정도라고 보시면 됩니다. 충분히 해볼 만합니다." },
-  });
-  const { analyze } = await importMain();
-
-  // narrate.js의 해설 캐시는 모듈 단위(프로세스 수명)라 importMain()으로
-  // 격리되지 않는다. cacheKey에 층수가 들어가므로 층을 달리해 이전 테스트가
-  // 심어둔 캐시를 타지 않게 한다(계수가 전부 1.0이라 등급은 동일하다).
-  const payload = await analyze({ address: "아무 주소", industryText: "한식", floor: "F3P" });
-  assert.equal(payload.narration.aiText, null);
-  assert.ok(payload.narration.factors.length > 0, "AI가 걸러져도 템플릿 근거는 그대로 나와야 한다");
-  assert.equal(payload.verdict.grade !== undefined, true);
-});
-
-test("개정 (바): 프록시 미배포 상태(모든 AI 호출 실패)에서도 등급·근거·대안이 그대로 나온다", async () => {
-  installDom(ALL_IDS);
-  stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO }); // AI 두 엔드포인트 모두 {ok:false}
-  const { analyze } = await importMain();
-
-  // 위 테스트와 같은 이유로 층수를 달리해 해설 캐시를 피한다.
-  const payload = await analyze({ address: "아무 주소", industryText: "한식", floor: "B1" });
-  assert.equal(payload.precision.level, "area");
-  assert.ok(payload.verdict.grade);
-  assert.ok(payload.narration.factors.length > 0);
-  assert.equal(payload.narration.aiText, null);
-});
-
-test("I2: /map-industry가 응답하지 않아도 매달리지 않고 목록 선택 안내로 떨어진다",
-  { timeout: 10000 }, async () => {
-    installDom(ALL_IDS);
-    stubFetch({ metaOk: true, geocodeResponse: HAPPY_GEO });
-    const inner = global.fetch;
-    // 영원히 응답하지 않는 프록시. AbortSignal이 없으면 analyze()가 그대로
-    // 멈추고 "목록에서 선택해 주세요" 폴백은 영영 안 뜬다 — 조용히 삼키는
-    // 것과 조용히 멈추는 것은 다르다.
-    global.fetch = async (url, init) => {
-      if (String(url).includes("/map-industry")) {
-        return new Promise((_, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-        });
-      }
-      return inner(url, init);
-    };
-
-    const { analyze } = await importMain();
-    const started = Date.now();
-    await assert.rejects(
-      () => analyze({ address: "아무 주소", industryText: "카페라떼 파는 곳", floor: "F2" }),
-      /업종을 인식하지 못했습니다/,
-    );
-    assert.ok(Date.now() - started < 8000, "타임아웃이 동작해야 한다");
-  });
+// 2026-08-09: /map-industry 타임아웃 테스트는 삭제했다 — 그 엔드포인트가
+// 없어졌다. 별칭 사전은 네트워크를 타지 않으므로 매달릴 자리가 없다.

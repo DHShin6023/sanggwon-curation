@@ -155,6 +155,10 @@ def main() -> None:
         "industries": [{"code": str(c), "name": str(n),
                         "group": assets.groups.get(str(c), "")}
                        for c, n in names.itertuples(index=False)],
+        # 창업자 어휘 → 업종코드. AI 업종매핑을 걷어내고 이 사전으로 대체했다
+        # (2026-08-09 결정). 키는 공백을 제거한 형태로 미리 정규화해 내보낸다 —
+        # 브라우저가 매 입력마다 355개를 다시 정규화할 이유가 없다.
+        "industry_aliases": assets.aliases,
         "gu": SEOUL_GU,
         "sources": SOURCES,
         "floor_basis": "heuristic",

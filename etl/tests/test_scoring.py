@@ -34,6 +34,7 @@ def _assets(**over):
         },
         demand_modes={"유동의존형": scoring.MODE_MEAN, "배후의존형": scoring.MODE_MEAN},
         strongest_weight=0.6,
+        aliases={"치킨집": "CS1", "카페": "CS2"},
         floors={"유동의존형": {f: 1.0 for f in FLOORS},
                 "배후의존형": {f: 1.0 for f in FLOORS}},
         floor_warn_below=0.75,
@@ -236,7 +237,8 @@ def test_load_domain_rejects_unknown_demand_mode(tmp_path, monkeypatch):
     import json as _json
     from etl import config as _config
     src = _config.DOMAIN_DIR
-    for name in ("industry_groups.json", "axis_weights.json", "floor_coefficients.json"):
+    for name in ("industry_groups.json", "axis_weights.json",
+                 "floor_coefficients.json", "industry_aliases.json"):
         (tmp_path / name).write_text((src / name).read_text(encoding="utf-8"), encoding="utf-8")
     w = _json.loads((tmp_path / "axis_weights.json").read_text(encoding="utf-8"))
     w["demand_modes"]["복합의존형"] = "최대값만"
@@ -244,3 +246,70 @@ def test_load_domain_rejects_unknown_demand_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(scoring, "DOMAIN_DIR", tmp_path)
     with pytest.raises(ValueError, match="demand_mode"):
         scoring.load_domain()
+
+
+# ── 별칭 사전 (2026-08-09, AI 업종매핑 대체) ─────────────────────────
+
+def _alias_dir(tmp_path, mutate):
+    """실제 도메인 자산을 복사한 뒤 별칭 사전만 손본다."""
+    import json as _json
+    from etl import config as _config
+    src = _config.DOMAIN_DIR
+    for name in ("industry_groups.json", "axis_weights.json",
+                 "floor_coefficients.json", "industry_aliases.json"):
+        (tmp_path / name).write_text((src / name).read_text(encoding="utf-8"), encoding="utf-8")
+    d = _json.loads((tmp_path / "industry_aliases.json").read_text(encoding="utf-8"))
+    mutate(d)
+    (tmp_path / "industry_aliases.json").write_text(
+        _json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    return tmp_path
+
+
+def test_aliases_are_normalised_and_point_at_real_industries():
+    assets = scoring.load_domain()
+    assert assets.aliases, "별칭 사전이 비어 있다"
+    assert all(" " not in key for key in assets.aliases), "키에 공백이 남아 있다"
+    assert all(code in assets.groups for code in assets.aliases.values())
+
+
+def test_alias_collision_kills_the_build(tmp_path, monkeypatch):
+    """한 별칭이 두 업종을 가리키면 사용자는 왜 그 업종이 됐는지 알 수 없다."""
+    def mutate(d):
+        d["aliases"]["CS100001"].append("커피숍")   # 이미 커피-음료(CS100010)의 별칭
+    monkeypatch.setattr(scoring, "DOMAIN_DIR", _alias_dir(tmp_path, mutate))
+    with pytest.raises(ValueError, match="두 업종을 가리킨다"):
+        scoring.load_domain()
+
+
+def test_alias_with_unknown_industry_code_kills_the_build(tmp_path, monkeypatch):
+    """모르는 코드를 놔두면 그 별칭이 영영 죽은 채로 남는다."""
+    def mutate(d):
+        d["aliases"]["CS999999"] = ["없는업종"]
+    monkeypatch.setattr(scoring, "DOMAIN_DIR", _alias_dir(tmp_path, mutate))
+    with pytest.raises(ValueError, match="모르는 업종코드"):
+        scoring.load_domain()
+
+
+def test_alias_duplicating_a_standard_name_kills_the_build(tmp_path, monkeypatch):
+    """정확일치가 먼저 처리하므로 표준명을 별칭에 두면 중복이다."""
+    def mutate(d):
+        d["aliases"]["CS100001"].append("편의점")
+    monkeypatch.setattr(scoring, "DOMAIN_DIR", _alias_dir(tmp_path, mutate))
+    with pytest.raises(ValueError, match="표준 업종명과 같다"):
+        scoring.load_domain()
+
+
+def test_common_founder_vocabulary_is_covered():
+    """이 사전이 존재하는 이유 자체를 고정한다.
+
+    도입 전 실측: 아래 어휘 중 26개(70%)가 이름 부분일치만으로는 실패했다.
+    카페·치킨집·술집·빵집·약국·병원처럼 가장 흔한 말이 전부 실패했다.
+    """
+    assets = scoring.load_domain()
+    names = {code: item for code, item in assets.groups.items()}
+    vocabulary = ["치킨집", "카페", "술집", "빵집", "약국", "병원", "헬스장",
+                  "고깃집", "분식집", "꽃집", "정육점", "과일가게", "옷가게",
+                  "피시방", "네일샵", "카센터", "펫샵", "서점", "문구점"]
+    missing = [w for w in vocabulary if w.replace(" ", "") not in assets.aliases]
+    assert missing == [], f"창업자가 흔히 쓰는 말이 사전에 없다: {missing}"
+    assert all(assets.aliases[w] in names for w in vocabulary)
