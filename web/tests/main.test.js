@@ -213,16 +213,17 @@ test("I1(리뷰가 제시한 재현): floor_config.coefficients에서 그룹 하
   stubFetch({
     metaOk: true,
     // 좌표는 위 F1 테스트와 동일 — "배화여자대학교(박노수미술관)"에 매치되고
-    // CS100001(한식음식점, group: 유동의존형)은 base != null이다.
+    // CS100001(한식음식점)은 base != null이다.
     geocodeResponse: { lng: 126.96686300917433, lat: 37.580259174311934, gu_code: "11110", dong_code: "11110515" },
     metaTransform: (m) => {
       const clone = structuredClone(m);
-      // 현재 실데이터에서 모든 업종의 group은 "유동의존형"이다 — 이걸
-      // floor_config.coefficients에서 지우면 judge()의 floorCoefficient()가
-      // "알 수 없는 업종군" 예외를 던진다(verdict.js). 이게 배포 설정
-      // 오류의 실제 형태다: meta.json 전체 shape은 멀쩡한데(validateMeta
-      // 통과) 특정 그룹만 빠졌다.
-      delete clone.floor_config.coefficients["유동의존형"];
+      // 이 테스트가 쓰는 업종의 그룹을 meta에서 직접 읽어 지운다. 예전엔
+      // "유동의존형"을 하드코딩했는데, 신동환 확정 분류표가 들어오면서
+      // 한식음식점이 복합의존형으로 옮겨가자 **지운 그룹이 이 업종과 무관해져
+      // 테스트가 조용히 무력화됐다**(config_error 대신 정상 판정이 나왔다).
+      // 실데이터를 하드코딩으로 흉내내면 이렇게 된다.
+      const group = clone.industries.find((i) => i.code === "CS100001").group;
+      delete clone.floor_config.coefficients[group];
       return clone;
     },
   });
@@ -239,30 +240,41 @@ test("I1(리뷰가 제시한 재현): floor_config.coefficients에서 그룹 하
 // 수 있습니다")이 아니라 실제로 로드한 계수를 보고 확정적으로 말해야 한다.
 // ---------------------------------------------------------------------
 
-test("C1: 실데이터(계수 전부 1.0)로 부트스트랩하면 배너가 '전혀 영향을 주지 않는다'고 확정적으로 말한다", async () => {
+// 2026-08-09: 신동환 확정 계수가 들어오면서 이 두 테스트의 방향이 뒤집혔다.
+// C1의 설계 의도가 정확히 이거였다 — 문구를 하드코딩하지 않고 로드한 계수에서
+// 유도했기 때문에, **아무도 문자열을 고치지 않았는데 코드가 알아서 반대 사실을
+// 말하기 시작했다.** 테스트만 새 현실로 옮긴다.
+
+test("C1: 실계수가 들어온 실데이터로 부트스트랩하면 '영향 없음' 문구를 쓰지 않는다", async () => {
   const els = installDom(ALL_IDS);
-  stubFetch({ metaOk: true }); // 실제 meta.json: provisional true, 6개 그룹 전부 1.0
+  stubFetch({ metaOk: true }); // 실제 meta.json: 7개 그룹, 계수 35개 중 1.0이 아닌 것 다수
   await importMain();
   assert.equal(els["provisional-notice"].hidden, false);
-  assert.match(els["provisional-notice"].textContent, /전혀 영향을 주지 않습니다/);
-  assert.doesNotMatch(els["provisional-notice"].textContent, /있을 수 있습니다/,
-    "확인 가능한 사실을 '있을 수 있다'는 하드코딩된 애매함으로 말하면 안 된다(C1)");
+  assert.doesNotMatch(els["provisional-notice"].textContent, /전혀 영향을 주지 않습니다/,
+    "계수가 실제로 등급을 바꾸는데 '영향 없음'이라고 하면 거짓이다");
+  assert.match(els["provisional-notice"].textContent, /잠정값/,
+    "값이 정해진 것과 검증된 것은 다르다 — provisional인 동안은 그대로 밝힌다");
 });
 
-test("C1: 계수 중 하나라도 1.0이 아니면 확정적 문구를 쓰지 않는다", async () => {
+test("C1: 계수가 전부 1.0으로 되돌아가면 '전혀 영향을 주지 않는다'고 확정적으로 말한다", async () => {
+  // 빌드 사고·자산 덮어쓰기로 다시 항등이 되는 경우. 그때는 애매하게
+  // ("있을 수 있습니다") 말하지 않고 확인된 사실을 확정적으로 말해야 한다.
   const els = installDom(ALL_IDS);
   stubFetch({
     metaOk: true,
     metaTransform: (m) => {
       const clone = structuredClone(m);
-      clone.floor_config.coefficients["유동의존형"].F2 = 0.8;
+      for (const table of Object.values(clone.floor_config.coefficients)) {
+        for (const floor of Object.keys(table)) table[floor] = 1.0;
+      }
       return clone;
     },
   });
   await importMain();
   assert.equal(els["provisional-notice"].hidden, false);
-  assert.doesNotMatch(els["provisional-notice"].textContent, /전혀 영향을 주지 않습니다/);
-  assert.match(els["provisional-notice"].textContent, /잠정값/);
+  assert.match(els["provisional-notice"].textContent, /전혀 영향을 주지 않습니다/);
+  assert.doesNotMatch(els["provisional-notice"].textContent, /있을 수 있습니다/,
+    "확인 가능한 사실을 하드코딩된 애매함으로 말하면 안 된다(C1)");
 });
 
 // ---------------------------------------------------------------------
