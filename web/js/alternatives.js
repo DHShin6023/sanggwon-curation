@@ -52,6 +52,19 @@ export function filterByFloor(codes, { groups, floor, floorTable, minCoefficient
   return { passed, excluded };
 }
 
+// 한글 체언 뒤 "은/는" 조사. 받침이 있으면 "은", 없으면 "는".
+//
+// ⚠️ 2026-08-09 실배포 관통 검증에서 잡았다. "은"이 하드코딩돼 있어
+// 「물으신 커피-음료은 경쟁점 62곳인데」가 화면에 나갔다. 받침 없이 끝나는
+// 업종명이 커피-음료·문구·신발·가구·완구·안경 등 여럿이라 드문 오타가 아니다.
+// (narrate.js는 같은 이유로 이미 josaGa를 두고 있었는데, 이 파일은 없었다.)
+function josaEun(word) {
+  if (!word) return "은";
+  const code = word.charCodeAt(word.length - 1);
+  if (code < 0xac00 || code > 0xd7a3) return "은";   // 한글이 아니면 기본값
+  return (code - 0xac00) % 28 !== 0 ? "은" : "는";
+}
+
 // 스펙 8.3 — "이 업종이 좋습니다"가 아니라 "물어본 것보다 왜 나은가"를 서술한다.
 // 없는 데이터로 비교문을 만들지 않는다: 어느 한쪽이라도 null이면 그 항목은
 // 그냥 언급하지 않는다(예: sales_per_store 한쪽이 null이면 매출 배수를 지어내지 않는다).
@@ -62,8 +75,8 @@ function buildReason({ candidate, asked, area }) {
 
   if (theirs && theirs.store_count != null && mine.store_count != null) {
     parts.push(
-      `물으신 ${asked.name}은 경쟁점 ${theirs.store_count}곳인데 ` +
-      `${candidate.name}은 ${mine.store_count}곳입니다.`
+      `물으신 ${asked.name}${josaEun(asked.name)} 경쟁점 ${theirs.store_count}곳인데 ` +
+      `${candidate.name}${josaEun(candidate.name)} ${mine.store_count}곳입니다.`
     );
   }
   if (mine.patterns?.includes("블루오션")) {

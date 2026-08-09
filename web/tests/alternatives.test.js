@@ -232,6 +232,22 @@ test("실데이터: 신동환 확정 계수가 들어와 층수 필터가 실제
     "1층은 상대값의 기준점이라 반드시 1.00이다");
 });
 
+// 실데이터 픽스처. 런타임과 같은 경로로 자산을 만든다 — 웹은 data/domain/을
+// 못 읽고 meta.json의 floor_config만 본다(build.py가 실어 보낸다).
+function realFixture(gu = "11440", areaName = "합정역") {
+  const score = readJSON(`../data/score/${gu}.json`);
+  const meta = readJSON("../data/meta.json");
+  const assets = {
+    groups: Object.fromEntries(meta.industries.map((i) => [i.code, i.group])),
+    floorTable: meta.floor_config.coefficients,
+    warnBelow: meta.floor_config.warn_below,
+    minCoefficient: meta.floor_config.min_coefficient,
+  };
+  const entry = Object.entries(score.areas).find(([, a]) => a.name === areaName)
+    ?? Object.entries(score.areas)[0];
+  return { area: entry[1], meta, assets };
+}
+
 test("실데이터: 11110 상권에서 real assets로 recommend가 돌아간다 (의원 등장은 의도된 출력)", () => {
   const score = readJSON("../data/score/11110.json");
   const meta = readJSON("../data/meta.json");
@@ -256,4 +272,37 @@ test("실데이터: 11110 상권에서 real assets로 recommend가 돌아간다 
     "실제 도메인 자산으로는 층수 설정 결측이 나오면 안 된다");
   // 의원·약국이 여기 섞여 나오는 것은 결함이 아니다(2026-08-08 결정). 이 테스트는
   // 그것을 막지 않는다는 사실을 명시적으로 남겨둔다.
+});
+
+// ---------------------------------------------------------------------
+// 2026-08-09 실배포 관통 검증에서 발견. 실제 출력이 이랬다:
+//
+//   "물으신 커피-음료은 경쟁점 62곳인데 안경은 5곳입니다."
+//
+// "커피-음료"는 받침이 없으니 "커피-음료는"이 맞다. narrate.js는 같은 이유로
+// 이미 josaGa()를 두고 있었는데(커피-음료이 → 커피-음료가), alternatives.js는
+// "은"을 하드코딩하고 있었다. 업종명 62개 중 받침 없이 끝나는 것이 여럿이라
+// (커피-음료, 문구, 신발, 가구, 완구, 안경 …) 드물게 나는 오타가 아니다.
+// ---------------------------------------------------------------------
+
+test("받침 없는 업종명에는 조사 '는'이 붙는다 (커피-음료은 ✗ / 커피-음료는 ✓)", () => {
+  const { area, meta, assets } = realFixture();
+  const { recommendations } = recommend({
+    area, meta, assets, floor: "F1", askedCode: "CS100010" });   // 커피-음료
+  const withReason = recommendations.filter((r) => /커피-음료/.test(r.reason));
+  assert.ok(withReason.length > 0, "커피-음료를 물었으니 이유 문장에 그 이름이 나와야 한다");
+  for (const r of withReason) {
+    assert.doesNotMatch(r.reason, /커피-음료은/, "받침 없는 이름에 '은'을 붙이면 안 된다");
+    assert.match(r.reason, /커피-음료는/);
+  }
+});
+
+test("받침 있는 업종명에는 조사 '은'이 그대로 붙는다", () => {
+  const { area, meta, assets } = realFixture();
+  const { recommendations } = recommend({
+    area, meta, assets, floor: "F1", askedCode: "CS100001" });   // 한식음식점
+  const withReason = recommendations.filter((r) => /한식음식점/.test(r.reason));
+  for (const r of withReason) {
+    assert.match(r.reason, /한식음식점은/);
+  }
 });
