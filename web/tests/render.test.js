@@ -215,7 +215,7 @@ test("I2: 대안 점수가 asked 이하면 중립적 헤딩 + 카드별 경고�
 test("I2(실측 재현): 대안이 asked보다 점수는 높지만 등급이 똑같이 '하'면 '더 맞는 업종'이라고 하지 않는다", () => {
   const root = new FakeNode("section");
   // 청계산원터골/한식음식점(F1) 실측값 그대로.
-  const askedVerdict = { ...VERDICT, grade: "하", meaning: "말립니다", score: 28.6643, rank: "하위 25%" };
+  const askedVerdict = { ...VERDICT, grade: "하", meaning: "이 업종과는 잘 맞지 않는 자리", score: 28.6643, rank: "하위 25%" };
   const alts = [
     { code: "CS100010", name: "커피-음료", grade: "하", score: 33.1455, reason: "r", patternsUnknown: [], poolSize: 914, warning: null },
     { code: "CS300024", name: "운동/경기용품", grade: "하", score: 31.25, reason: "r", patternsUnknown: [], poolSize: 200, warning: null },
@@ -224,12 +224,12 @@ test("I2(실측 재현): 대안이 asked보다 점수는 높지만 등급이 똑
   const section = root.query("alternatives");
   const heading = section.children.find((c) => c.tagName === "h2");
   assert.equal(heading.textContent, "이 상권의 다른 업종",
-    "verdict.js 자신이 '하'를 '말립니다'라고 하는데 그 등급의 후보를 '더 맞는 업종'이라 부르면 모순이다");
+    "verdict.js 자신이 '하'를 '잘 맞지 않는 자리'라고 하는데 그 등급의 후보를 '더 맞는 업종'이라 부르면 모순이다");
   // asked 자신도 안 좋은 등급이므로 "이 자리 자체가 안 좋다"는 강한 문구가 붙어야 한다.
   assert.match(section.textContent, /어떤 업종에도 특별히 좋아 보이지 않습니다/);
-  // 각 카드에도 "적극 추천할 수준은 아니다" 경고가 붙어야 한다(점수는 asked보다 높으므로
+  // 각 카드에도 등급이 낮다는 캡션이 붙어야 한다(점수는 asked보다 높으므로
   // '점수가 낮다' 캡션이 아니라 '등급이 낮다' 캡션이 붙어야 한다).
-  const gradeCautions = section.queryAll("alt-note").filter((n) => /적극 추천할 수준은 아닙니다/.test(n.textContent));
+  const gradeCautions = section.queryAll("alt-note").filter((n) => /뚜렷하게 나은 선택은 아닙니다/.test(n.textContent));
   assert.equal(gradeCautions.length, 2);
 });
 

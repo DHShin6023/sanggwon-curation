@@ -78,9 +78,10 @@ function altPoolAndPatternNotes(alt) {
   return notes;
 }
 
-// F1/F8이 "상"·"중상"만 실제로 추천할 만한 등급이라고 취급한다 — "중하"/
-// "하"는 verdict.js의 GRADE_MEANING 자체가 "권하지 않음"/"말립니다"라고
-// 말하는 등급이라, 그런 등급을 "더 맞는 업종"이라고 부르면 안 된다(I2).
+// F1/F8이 "상"·"중상"만 실제로 대안으로 내놓을 만한 등급이라고 취급한다.
+// verdict.js의 GRADE_MEANING이 "중하"를 「약점이 뚜렷한 자리」, "하"를
+// 「이 업종과는 잘 맞지 않는 자리」라고 말하는데, 그런 등급을 "더 맞는 업종"
+// 이라고 부르면 화면 두 곳이 서로 모순된다(I2).
 const GOOD_GRADES = new Set(["상", "중상"]);
 
 // F7/M1 — 대안 0건. 원안(라운드 1)은 세 갈래였는데, 리뷰가 지적한 대로
@@ -119,7 +120,7 @@ function renderAlternatives(root, payload) {
   // 후보가 "중하"·"하"여도 만족될 수 있다(실측: 청계산원터골/한식음식점은
   // "하"·score 28.66인데, 대안으로 뜨는 커피-음료·운동/경기용품도 둘 다
   // "하"이면서 점수만 조금 더 높다 — "더 맞는 업종"이라고 부르면 verdict.js
-  // 자신의 GRADE_MEANING("말립니다")과 모순된다). "더 맞는 업종"이라는
+  // 자신의 GRADE_MEANING(「잘 맞지 않는 자리」)과 모순된다). "더 맞는 업종"이라는
   // 헤딩은 상/중상 등급이면서 동시에 asked보다 점수가 높은 후보가 하나라도
   // 있을 때만 쓴다.
   const hasGenuinelyBetter = alternatives.some((a) => GOOD_GRADES.has(a.grade) && a.score > verdict.score);
@@ -161,7 +162,7 @@ function renderAlternatives(root, payload) {
     } else if (!GOOD_GRADES.has(alt.grade)) {
       card.append(el(
         "p", "alt-note caution",
-        `참고: 이 업종도 등급은 ${alt.grade}입니다 — 적극 추천할 수준은 아닙니다.`,
+        `참고: 이 업종도 등급은 ${alt.grade}입니다 — 이 자리에서 뚜렷하게 나은 선택은 아닙니다.`,
       ));
     }
     for (const note of altPoolAndPatternNotes(alt)) {
