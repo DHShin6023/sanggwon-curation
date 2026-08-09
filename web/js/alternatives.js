@@ -82,11 +82,20 @@ function buildReason({ candidate, asked, area }) {
   if (mine.patterns?.includes("블루오션")) {
     parts.push("배후 수요 대비 공급이 명백히 부족합니다.");
   }
-  if (mine.sales_per_store != null && theirs?.sales_per_store != null &&
-      mine.sales_per_store > theirs.sales_per_store) {
-    const ratio = (mine.sales_per_store / theirs.sales_per_store).toFixed(1);
-    parts.push(`점포당 추정매출도 약 ${ratio}배 높습니다.`);
-  }
+  // ⚠️ 2026-08-09 삭제: 여기 「점포당 추정매출도 약 N배 높습니다」가 있었다.
+  //
+  // 실배포 출력이 "화장품 대비 편의점 약 130.1배"였다. 데이터 오류라기보다
+  // 비교 자체가 성립하지 않는다 — 편의점과 화장품은 회전율·객단가·매출구조가
+  // 다른 업종이라 점포당 매출을 맞대는 것이 의미가 없다. 서울 전역 중앙값으로도
+  // 편의점 3.44억 vs 네일숍 0.02억(172배)이라 특이 상권의 문제도 아니다.
+  //
+  // 더 근본적으로: 이 엔진의 6개 축은 전부 **같은 업종 안에서의 백분위**이고
+  // 그게 이 서비스가 공정하다고 말할 수 있는 근거인데, 이 문장 하나만 그
+  // 원칙을 깨고 업종 간 원값을 직접 비교했다. 숫자는 진짜지만 문장은 거짓인
+  // 셈이고, 이 프로젝트가 계속 잡아온 결함과 같은 종류다.
+  //
+  // 점포수 비교(위)는 같은 단위라 그대로 둔다. 되살릴 일이 생기면 반드시
+  // 같은 업종 안의 백분위로 바꿔서 되살릴 것 — 원값 배수로는 안 된다.
   return parts.join(" ") || `${candidate.name}의 적합도가 더 높게 나왔습니다.`;
 }
 

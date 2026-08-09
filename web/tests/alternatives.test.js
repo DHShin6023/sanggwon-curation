@@ -306,3 +306,40 @@ test("받침 있는 업종명에는 조사 '은'이 그대로 붙는다", () => 
     assert.match(r.reason, /한식음식점은/);
   }
 });
+
+// ---------------------------------------------------------------------
+// 2026-08-09 신동환 결정: 업종 간 「점포당 매출 N배」 비교문을 삭제한다.
+//
+// 실제 출력이 이랬다:
+//   "물으신 화장품은 경쟁점 11곳인데 편의점은 3곳입니다.
+//    점포당 추정매출도 약 130.1배 높습니다."
+//
+// 데이터 오류라기보다 비교 자체가 성립하지 않는다. 편의점과 화장품은
+// 회전율·객단가·매출구조가 다른 업종이라 점포당 매출을 맞대는 것이 의미가
+// 없다. 서울 전역 중앙값으로도 편의점 3.44억 vs 네일숍 0.02억(172배)이다.
+//
+// 더 근본적으로: 이 엔진의 6개 축은 전부 **같은 업종 안에서의 백분위**이고
+// 그게 공정함의 근거인데, 이 문장 하나만 그 원칙을 깨고 업종 간 원값을
+// 직접 비교했다. 점포수 비교(같은 단위)는 그대로 둔다.
+// ---------------------------------------------------------------------
+
+test("업종 간 점포당 매출 배수는 이유 문장에 넣지 않는다", () => {
+  const { area, meta, assets } = realFixture("11500", "화곡역");
+  const { recommendations } = recommend({
+    area, meta, assets, floor: "F1", askedCode: "CS300022" });   // 화장품
+  assert.ok(recommendations.length > 0);
+  for (const r of recommendations) {
+    assert.doesNotMatch(r.reason, /배 높습니다|점포당 추정매출/,
+      "업종이 다르면 점포당 매출은 맞댈 수 있는 값이 아니다");
+  }
+});
+
+test("매출 배수를 빼도 이유 문장은 비지 않는다(점포수 비교가 남는다)", () => {
+  const { area, meta, assets } = realFixture("11500", "화곡역");
+  const { recommendations } = recommend({
+    area, meta, assets, floor: "F1", askedCode: "CS300022" });
+  for (const r of recommendations) {
+    assert.ok(r.reason && r.reason.trim().length > 0, "이유가 빈 문자열이면 안 된다");
+    assert.match(r.reason, /경쟁점|적합도가 더 높게/);
+  }
+});
