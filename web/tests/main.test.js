@@ -88,7 +88,11 @@ test("정상 부트스트랩: data-period/sources/datalist가 실제 meta.json �
   const els = installDom(ALL_IDS);
   stubFetch({ metaOk: true });
   await importMain();
-  assert.match(els["data-period"].textContent, /2026년 1분기/);
+  // 분기 라벨은 분기 ETL마다 바뀐다 — 하드코딩하면 갱신 때마다 배포가 막힌다
+  // (2026-11-06 실제로 2분기 갱신 후 Pages 배포가 이 줄에서 실패했다).
+  const meta = JSON.parse(fs.readFileSync(path.join(WEB_ROOT, "data/meta.json"), "utf-8"));
+  assert.ok(meta.period_label, "meta.json에 period_label이 있어야 한다");
+  assert.ok(els["data-period"].textContent.includes(meta.period_label));
   assert.match(els.sources.textContent, /서울 열린데이터광장/);
   assert.ok(els["industry-options"].children.length > 50, "meta.industries 62개가 datalist option으로 들어가야 한다");
 });
@@ -161,7 +165,12 @@ test("F5: 상권 폴리곤 밖 + 실재하는 행정동이면 precision.level은
   assert.equal(payload.precision.level, "dong");
   assert.ok(payload.dongInfo);
   assert.equal(payload.dongInfo.dongCode, "11110515");
-  assert.equal(payload.dongInfo.salesTotal, 3865728183);
+  // 기대값은 실제 dong/11110.json에서 읽는다 — 매출은 분기마다 바뀌므로 숫자를
+  // 박아두면 분기 갱신 때마다 깨진다. 검증 대상은 "올바른 칸을 꺼내 싣는가"다.
+  const dongFile = JSON.parse(fs.readFileSync(path.join(WEB_ROOT, "data/dong/11110.json"), "utf-8"));
+  const expected = dongFile.dongs["11110515"].industries.CS100001.sales_total;
+  assert.equal(typeof expected, "number");
+  assert.equal(payload.dongInfo.salesTotal, expected);
 });
 
 test("F6(out_of_bounds): 폴리곤도 행정동도 없으면 순수 out_of_bounds다", async () => {
