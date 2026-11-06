@@ -16,7 +16,15 @@
 // 되살릴 일이 생기면 git 이력에서 꺼내되, 클라이언트 쪽 validateNarration을
 // 반드시 함께 되살릴 것.
 
-const ALLOWED_ORIGINS = ["https://dhshin6023.github.io", "http://localhost:8080"];
+// 2026-09-03: Vercel 배포를 추가했다. 같은 저장소의 web/ 을 GitHub Pages와
+// Vercel 두 곳에서 서비스하므로 Origin이 둘이다. 프리뷰 배포
+// (sanggwon-curation-<해시>.vercel.app)는 URL이 매번 달라 여기 못 넣는다 —
+// 프리뷰에서 주소 검색을 쓰려면 그때 별도로 판단한다.
+const ALLOWED_ORIGINS = [
+  "https://dhshin6023.github.io",
+  "https://sanggwon-curation.vercel.app",
+  "http://localhost:8080",
+];
 
 // 업스트림 타임아웃. fetch에는 기본 타임아웃이 없어서, 없으면 카카오가 멈출 때
 // "조용히 실패"가 아니라 "조용히 멈춤"이 된다.

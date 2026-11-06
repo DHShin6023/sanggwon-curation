@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write   # 아래 「Pages 재배포」에서 pages.yml을 직접 호출한다
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -71,10 +72,27 @@ jobs:
           PY
 
       - name: 변경분 커밋
+        id: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add web/data/
-          git diff --staged --quiet || git commit -m "chore(data): 분기 갱신"
-          git pull --rebase --autostash
-          git push
+          if git diff --staged --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore(data): 분기 갱신"
+            git pull --rebase --autostash
+            git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ⚠️ 2026-11-06: GITHUB_TOKEN으로 한 push는 다른 워크플로의 push 트리거를
+      # 깨우지 않는다(GitHub의 무한루프 방지 규칙). 그래서 위 커밋만으로는
+      # pages.yml이 돌지 않고 GitHub Pages가 옛 데이터에 머문다 — Vercel은
+      # 자체 Git 연동이라 갱신되므로 두 주소가 조용히 어긋난다.
+      # workflow_dispatch는 이 규칙의 예외라 직접 호출한다.
+      - name: Pages 재배포
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main
